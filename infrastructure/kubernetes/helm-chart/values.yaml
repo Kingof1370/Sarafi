@@ -1,0 +1,22 @@
+# Default values for Velyxora Enterprise Exchange.
+replicaCount: 2
+
+image:
+  repository: velyxora/api-gateway
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+service:
+  type: ClusterIP
+  port: 8080
+
+ingress:
+  enabled: false
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 1024Mi
+  requests:
+    cpu: 500m
+    memory: 512Mi

@@ -1,0 +1,13 @@
+go 1.25.0
+
+use (
+	./apps/backend
+	./apps/matching-engine
+	./apps/wallet-service
+	./packages/common
+	./packages/database
+	./packages/logger
+	./packages/security
+	./packages/types
+	./tests
+)
