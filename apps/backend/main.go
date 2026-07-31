@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -53,7 +55,7 @@ func main() {
 		KafkaBrokers: strings.Split(getEnv("KAFKA_BROKERS", "localhost:9092"), ","),
 	}
 
-	// 3. Setup Postgres Connection (Ignored or warns on error for local execution during build step)
+	// 3. Setup Postgres Connection
 	db, err := database.NewConnectionPool(database.Config{
 		Host:     cfg.DBHost,
 		Port:     cfg.DBPort,
@@ -86,14 +88,46 @@ func main() {
 	defer kafkaProducer.Close()
 	log.Info("Kafka Producer registered.")
 
-	// 6. Bootstrap Router
+	// 6. Setup Rate Limiter (e.g. max 100 requests per minute per IP)
+	limiter := common.NewRateLimiter(100, time.Minute)
+
+	// 7. Bootstrap Router
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
 
-	// Custom structured logger middleware
+	// Security Headers Middleware
+	r.Use(func(c *gin.Context) {
+		c.Writer.Header().Set("X-Frame-Options", "DENY")
+		c.Writer.Header().Set("X-Content-Type-Options", "nosniff")
+		c.Writer.Header().Set("X-XSS-Protection", "1; mode=block")
+		c.Writer.Header().Set("Content-Security-Policy", "default-src 'self'")
+		c.Writer.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		c.Next()
+	})
+
+	// CORS Policy Middleware
+	r.Use(func(c *gin.Context) {
+		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization")
+		if c.Request.Method == "OPTIONS" {
+			c.AbortWithStatus(http.StatusNoContent)
+			return
+		}
+		c.Next()
+	})
+
+	// Custom structured logger middleware with Request Tracing IDs
 	r.Use(func(c *gin.Context) {
 		start := time.Now()
+		traceID := c.GetHeader("X-Trace-ID")
+		if traceID == "" {
+			traceID = fmt.Sprintf("tr_%d", time.Now().UnixNano())
+		}
+		c.Set("trace_id", traceID)
+		c.Writer.Header().Set("X-Trace-ID", traceID)
+
 		path := c.Request.URL.Path
 		raw := c.Request.URL.RawQuery
 
@@ -103,6 +137,7 @@ func main() {
 		status := c.Writer.Status()
 
 		log.Info("HTTP Request",
+			"trace_id", traceID,
 			"method", c.Request.Method,
 			"path", path,
 			"query", raw,
@@ -112,7 +147,19 @@ func main() {
 		)
 	})
 
-	// Health Check Endpoint
+	// Rate Limiting Middleware
+	r.Use(func(c *gin.Context) {
+		ip := c.ClientIP()
+		if !limiter.Allow(ip) {
+			log.Warn("Rate limit exceeded", "ip", ip)
+			c.JSON(http.StatusTooManyRequests, gin.H{"error": "Too many requests. Please try again later."})
+			c.Abort()
+			return
+		}
+		c.Next()
+	})
+
+	// Health Check / Readiness / Liveness Probe Endpoint
 	r.GET("/health", func(c *gin.Context) {
 		dbStatus := "UP"
 		if db == nil || db.Ping(c.Request.Context()) != nil {
@@ -134,6 +181,11 @@ func main() {
 		})
 	})
 
+	// Prometheus Metrics Endpoint Placeholder
+	r.GET("/metrics", func(c *gin.Context) {
+		c.String(http.StatusOK, "# HELP velyxora_api_gateway_uptime Gateway uptime counter\n# TYPE velyxora_api_gateway_uptime counter\nvelyxora_api_gateway_uptime 1.0\n")
+	})
+
 	// V1 API Router Group
 	v1 := r.Group("/api/v1")
 	{
@@ -143,11 +195,20 @@ func main() {
 			auth.POST("/register", func(c *gin.Context) {
 				var req struct {
 					Email    string `json:"email" binding:"required,email"`
-					Password string `json:"password" binding:"required,min=8"`
+					Password string `json:"password" binding:"required"`
 				}
 
 				if err := c.ShouldBindJSON(&req); err != nil {
 					c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request parameters", "details": err.Error()})
+					return
+				}
+
+				// Strict Input Sanitization
+				sanitizedEmail := security.SanitizeInput(req.Email)
+
+				// Validate Password Strength Policy (P002 requirements)
+				if err := security.ValidatePasswordStrength(req.Password); err != nil {
+					c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "Weak password", "details": err.Error()})
 					return
 				}
 
@@ -158,13 +219,13 @@ func main() {
 					return
 				}
 
-				// For P001 foundation we perform a mock creation if database is not connected
+				// For P001/P002 foundation we perform a mock creation if database is not connected
 				userID := "usr_mock_" + fmt.Sprintf("%d", time.Now().UnixNano())
 				if db != nil {
 					// Prepare DB insert logic
 					_, err := db.Pool.Exec(context.Background(),
 						"INSERT INTO users (id, email, password_hash) VALUES ($1, $2, $3)",
-						userID, req.Email, hash)
+						userID, sanitizedEmail, hash)
 					if err != nil {
 						c.JSON(http.StatusConflict, gin.H{"error": "Email is already registered"})
 						return
@@ -175,7 +236,7 @@ func main() {
 					"message": "User registered successfully",
 					"user": gin.H{
 						"id":    userID,
-						"email": req.Email,
+						"email": sanitizedEmail,
 					},
 				})
 			})
@@ -211,14 +272,14 @@ func main() {
 				} else {
 					// Fallback Mock authentication for standalone verification/development runs
 					userID = "usr_mock_123"
-					hashedPassword, _ = security.HashPassword("password123")
-					if req.Email != "test@velyxora.com" || req.Password != "password123" {
+					hashedPassword, _ = security.HashPassword("StrongPass1!")
+					if req.Email != "test@velyxora.com" || req.Password != "StrongPass1!" {
 						c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid mock credentials"})
 						return
 					}
 				}
 
-				// Generate Tokens
+				// Generate Tokens (Hardened Expiration)
 				accessToken, refreshToken, err := security.GenerateJWT(
 					userID,
 					req.Email,
@@ -291,10 +352,33 @@ func main() {
 		}
 	}
 
-	log.Info(fmt.Sprintf("Velyxora REST Gateway running on port %s", cfg.Port))
-	if err := r.Run(":" + cfg.Port); err != nil {
-		log.Error(fmt.Sprintf("Failed to run HTTP server: %v", err))
+	srv := &http.Server{
+		Addr:    ":" + cfg.Port,
+		Handler: r,
 	}
+
+	// 8. Graceful Shutdown Management (P002 reliability target)
+	go func() {
+		log.Info(fmt.Sprintf("Velyxora REST Gateway running on port %s", cfg.Port))
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Error(fmt.Sprintf("Failed to run HTTP server: %v", err))
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+
+	log.Info("Shutting down API Gateway gateway gracefully...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Error(fmt.Sprintf("API Gateway forced to shutdown: %v", err))
+	}
+
+	log.Info("Velyxora REST Gateway exited successfully.")
 }
 
 // authMiddleware enforces valid JWT presence in Authorization headers

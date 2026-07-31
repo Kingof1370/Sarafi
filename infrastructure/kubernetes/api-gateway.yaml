@@ -27,6 +27,18 @@ spec:
           value: "redis:6379"
         - name: KAFKA_BROKERS
           value: "kafka:9092"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
         resources:
           limits:
             cpu: "1"
