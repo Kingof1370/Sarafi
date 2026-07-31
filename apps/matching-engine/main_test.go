@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strconv"
 	"testing"
 	"velyxora/packages/types"
 )
@@ -59,5 +60,22 @@ func TestOrderBookMatching(t *testing.T) {
 
 	if buyOrder.Status != types.StatusFilled {
 		t.Errorf("Expected buyer order status to be FILLED, got %s", buyOrder.Status)
+	}
+}
+
+func BenchmarkOrderBookMatching(b *testing.B) {
+	ob := NewOrderBook("BTC-USDT")
+	for i := 0; i < b.N; i++ {
+		sellOrder := &types.Order{
+			ID:        "sell_" + strconv.Itoa(i),
+			UserID:    "user_seller",
+			Symbol:    "BTC-USDT",
+			Side:      types.SideSell,
+			Type:      types.TypeLimit,
+			Price:     50000.0 + float64(i),
+			Quantity:  1.0,
+			FilledQty: 0.0,
+		}
+		ob.ProcessLimitOrder(sellOrder)
 	}
 }
