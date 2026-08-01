@@ -1,8 +1,24 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useAuthStore } from '../store/authStore';
 import api from '../lib/api';
+
+interface AdvancedOrder {
+  id: string;
+  client_order_id: string;
+  symbol: string;
+  side: string;
+  type: string;
+  price: number;
+  quantity: number;
+  filled_quantity: number;
+  status: string;
+  time_in_force: string;
+  stop_price?: number;
+  iceberg_size?: number;
+  created_at: string;
+}
 
 export default function Home() {
   const { user, accessToken, setAuth, logout } = useAuthStore();
@@ -18,7 +34,15 @@ export default function Home() {
   const [type, setType] = useState('LIMIT');
   const [price, setPrice] = useState('50000');
   const [quantity, setQuantity] = useState('0.1');
+  const [timeInForce, setTimeInForce] = useState('GTC');
+
+  // Advanced Algorithmic Fields
+  const [stopPrice, setStopPrice] = useState('0');
+  const [icebergSize, setIcebergSize] = useState('0');
+
   const [orderStatus, setOrderStatus] = useState('');
+  const [openOrders, setOpenOrders] = useState<AdvancedOrder[]>([]);
+  const [orderHistory, setOrderHistory] = useState<AdvancedOrder[]>([]);
 
   const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -41,22 +65,65 @@ export default function Home() {
     }
   };
 
+  const fetchOrders = useCallback(async () => {
+    if (!accessToken) return;
+    try {
+      const openRes = await api.get('/oms/open');
+      setOpenOrders(openRes.data.orders || []);
+
+      const histRes = await api.get('/oms/history');
+      setOrderHistory(histRes.data.orders || []);
+    } catch (err) {
+      console.error('Failed to load open orders', err);
+    }
+  }, [accessToken]);
+
   const placeOrder = async (e: React.FormEvent) => {
     e.preventDefault();
     setOrderStatus('');
     try {
-      const res = await api.post('/trading/orders', {
+      const res = await api.post('/oms/orders', {
         symbol,
         side,
         type,
         price: parseFloat(price),
         quantity: parseFloat(quantity),
+        time_in_force: timeInForce,
+        stop_price: parseFloat(stopPrice),
+        iceberg_size: parseFloat(icebergSize),
       });
-      setOrderStatus(`Success: Order ID ${res.data.order?.id}`);
+      setOrderStatus(`Success: Order processed. Status: ${res.data.order?.status}`);
+      fetchOrders();
     } catch (err: any) {
-      setOrderStatus(`Error: ${err.response?.data?.error || 'Failed to place order'}`);
+      setOrderStatus(`Error: ${err.response?.data?.error || 'Failed to process order'}`);
     }
   };
+
+  const cancelOrder = async (id: string) => {
+    try {
+      await api.delete(`/oms/orders/${id}`);
+      setOrderStatus(`Order ${id} cancelled successfully.`);
+      fetchOrders();
+    } catch (err: any) {
+      setOrderStatus(`Error cancelling order: ${err.response?.data?.error || err.message}`);
+    }
+  };
+
+  const bulkCancel = async () => {
+    try {
+      await api.post('/oms/orders/cancel-bulk', { symbol });
+      setOrderStatus(`Bulk cancel triggered for ${symbol}.`);
+      fetchOrders();
+    } catch (err: any) {
+      setOrderStatus(`Error: ${err.response?.data?.error || err.message}`);
+    }
+  };
+
+  useEffect(() => {
+    if (accessToken) {
+      fetchOrders();
+    }
+  }, [accessToken, fetchOrders]);
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100 p-8 font-sans">
@@ -139,7 +206,10 @@ export default function Home() {
             </div>
           ) : (
             <div className="space-y-6">
-              <h2 className="text-xl font-bold text-cyan-400 border-b border-slate-800 pb-2">Vault Security Profile</h2>
+              <div className="flex justify-between items-center border-b border-slate-800 pb-2">
+                <h2 className="text-xl font-bold text-cyan-400">Vault Security Profile</h2>
+                <button onClick={fetchOrders} className="text-xs text-cyan-400 underline">Refresh Orders</button>
+              </div>
               <div className="grid grid-cols-2 gap-4">
                 <div className="bg-slate-950 p-4 rounded-xl border border-slate-800/60">
                   <span className="block text-xs text-slate-500 font-medium">Authentication Authority</span>
@@ -150,9 +220,39 @@ export default function Home() {
                   <span className="block text-sm font-bold text-emerald-400 mt-1">Activated</span>
                 </div>
               </div>
-              <div className="bg-slate-950 p-4 rounded-xl border border-slate-800/60 space-y-2">
-                <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Multi-Factor Authentication</h3>
-                <p className="text-xs text-slate-500">MFA setup keys are prepared in core security modules for production activation.</p>
+
+              <div className="space-y-4">
+                <h3 className="text-sm font-bold text-slate-300">Open Orders ({openOrders.length})</h3>
+                {openOrders.length === 0 ? (
+                  <p className="text-xs text-slate-500">No active orders queued</p>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs text-left">
+                      <thead>
+                        <tr className="text-slate-500 border-b border-slate-800">
+                          <th className="py-2">Side/Type</th>
+                          <th>Price</th>
+                          <th>Qty/Filled</th>
+                          <th>Action</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {openOrders.map((ord) => (
+                          <tr key={ord.id} className="border-b border-slate-800/40">
+                            <td className="py-2">
+                              <span className={ord.side === 'BUY' ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>{ord.side}</span> {ord.type}
+                            </td>
+                            <td>{ord.price}</td>
+                            <td>{ord.quantity} / {ord.filled_quantity}</td>
+                            <td>
+                              <button onClick={() => cancelOrder(ord.id)} className="text-xs text-rose-400 hover:underline">Cancel</button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -160,7 +260,7 @@ export default function Home() {
 
         {/* Right Column: Trading Interface */}
         <section className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
-          <h2 className="text-xl font-bold mb-4 text-cyan-400">Order Entry (Matching Core Engine)</h2>
+          <h2 className="text-xl font-bold mb-4 text-cyan-400">Advanced OMS Terminal</h2>
           {!accessToken ? (
             <div className="flex flex-col items-center justify-center h-64 text-slate-500 border border-dashed border-slate-800 rounded-xl">
               <p className="text-sm">Please authenticate to gain access to order books</p>
@@ -208,38 +308,93 @@ export default function Home() {
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-3 gap-2">
                 <div>
-                  <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Price (USDT)</label>
+                  <label className="block text-xs font-semibold text-slate-400 tracking-wider mb-1">Type</label>
+                  <select
+                    value={type}
+                    onChange={(e) => setType(e.target.value)}
+                    className="w-full px-2 py-1.5 bg-slate-950 border border-slate-800 rounded text-xs text-slate-200"
+                  >
+                    <option value="LIMIT">LIMIT</option>
+                    <option value="MARKET">MARKET</option>
+                    <option value="STOP_LIMIT">STOP_LIMIT</option>
+                    <option value="STOP_MARKET">STOP_MARKET</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-400 tracking-wider mb-1">TIF</label>
+                  <select
+                    value={timeInForce}
+                    onChange={(e) => setTimeInForce(e.target.value)}
+                    className="w-full px-2 py-1.5 bg-slate-950 border border-slate-800 rounded text-xs text-slate-200"
+                  >
+                    <option value="GTC">GTC</option>
+                    <option value="IOC">IOC</option>
+                    <option value="FOK">FOK</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-400 tracking-wider mb-1">Stop Price</label>
+                  <input
+                    type="number"
+                    value={stopPrice}
+                    onChange={(e) => setStopPrice(e.target.value)}
+                    className="w-full px-2 py-1 bg-slate-950 border border-slate-800 rounded text-xs text-slate-200"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-3 gap-2">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-400 tracking-wider mb-1">Price (USDT)</label>
                   <input
                     type="number"
                     value={price}
                     onChange={(e) => setPrice(e.target.value)}
-                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-sm text-slate-200 focus:outline-none focus:border-cyan-500"
+                    className="w-full px-2 py-1 bg-slate-950 border border-slate-800 rounded text-xs text-slate-200"
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Quantity</label>
+                  <label className="block text-xs font-semibold text-slate-400 tracking-wider mb-1">Quantity</label>
                   <input
                     type="number"
                     step="0.0001"
                     value={quantity}
                     onChange={(e) => setQuantity(e.target.value)}
-                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-sm text-slate-200 focus:outline-none focus:border-cyan-500"
+                    className="w-full px-2 py-1 bg-slate-950 border border-slate-800 rounded text-xs text-slate-200"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-400 tracking-wider mb-1">Iceberg Size</label>
+                  <input
+                    type="number"
+                    value={icebergSize}
+                    onChange={(e) => setIcebergSize(e.target.value)}
+                    className="w-full px-2 py-1 bg-slate-950 border border-slate-800 rounded text-xs text-slate-200"
                   />
                 </div>
               </div>
 
-              <button
-                type="submit"
-                className={`w-full py-3 rounded-xl font-bold transition text-sm ${
-                  side === 'BUY'
-                    ? 'bg-emerald-500 hover:bg-emerald-400 text-slate-950 shadow-emerald-950/30 shadow-lg'
-                    : 'bg-rose-500 hover:bg-rose-400 text-slate-950 shadow-rose-950/30 shadow-lg'
-                }`}
-              >
-                Place {side} Order
-              </button>
+              <div className="flex gap-2">
+                <button
+                  type="submit"
+                  className={`flex-1 py-2.5 rounded-xl font-bold transition text-xs ${
+                    side === 'BUY'
+                      ? 'bg-emerald-500 hover:bg-emerald-400 text-slate-950 shadow-emerald-950/30'
+                      : 'bg-rose-500 hover:bg-rose-400 text-slate-950 shadow-rose-950/30'
+                  }`}
+                >
+                  Place {side} Order
+                </button>
+                <button
+                  type="button"
+                  onClick={bulkCancel}
+                  className="px-3 py-2 bg-slate-950 border border-rose-800 text-rose-400 rounded-xl hover:bg-rose-950/30 text-xs font-bold transition"
+                >
+                  Bulk Cancel
+                </button>
+              </div>
 
               {orderStatus && (
                 <div

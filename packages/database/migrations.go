@@ -106,6 +106,86 @@ var schemaMigrations = []Migration{
 			);
 		`,
 	},
+	{
+		ID:   6,
+		Name: "create_orders_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS orders (
+				id VARCHAR(255) PRIMARY KEY,
+				client_order_id VARCHAR(255) DEFAULT '' NOT NULL,
+				external_reference_id VARCHAR(255) DEFAULT '' NOT NULL,
+				execution_id VARCHAR(255) DEFAULT '' NOT NULL,
+				correlation_id VARCHAR(255) DEFAULT '' NOT NULL,
+				user_id VARCHAR(255) NOT NULL,
+				symbol VARCHAR(100) NOT NULL,
+				side VARCHAR(50) NOT NULL,
+				type VARCHAR(50) NOT NULL,
+				price DECIMAL(36, 18) NOT NULL,
+				quantity DECIMAL(36, 18) NOT NULL,
+				filled_quantity DECIMAL(36, 18) DEFAULT 0.0 NOT NULL,
+				status VARCHAR(50) NOT NULL,
+				time_in_force VARCHAR(50) DEFAULT 'GTC' NOT NULL,
+				expire_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				stop_price DECIMAL(36, 18) DEFAULT 0.0 NOT NULL,
+				trailing_delta DECIMAL(36, 18) DEFAULT 0.0 NOT NULL,
+				iceberg_size DECIMAL(36, 18) DEFAULT 0.0 NOT NULL,
+				post_only BOOLEAN DEFAULT FALSE NOT NULL,
+				reduce_only BOOLEAN DEFAULT FALSE NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+		`,
+	},
+	{
+		ID:   7,
+		Name: "create_order_history_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS order_history (
+				id VARCHAR(255) PRIMARY KEY,
+				user_id VARCHAR(255) NOT NULL,
+				symbol VARCHAR(100) NOT NULL,
+				side VARCHAR(50) NOT NULL,
+				type VARCHAR(50) NOT NULL,
+				price DECIMAL(36, 18) NOT NULL,
+				quantity DECIMAL(36, 18) NOT NULL,
+				filled_quantity DECIMAL(36, 18) NOT NULL,
+				status VARCHAR(50) NOT NULL,
+				created_at TIMESTAMP NOT NULL,
+				updated_at TIMESTAMP NOT NULL
+			);
+		`,
+	},
+	{
+		ID:   8,
+		Name: "create_order_events_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS order_events (
+				id VARCHAR(255) PRIMARY KEY,
+				order_id VARCHAR(255) NOT NULL,
+				event_type VARCHAR(50) NOT NULL,
+				payload TEXT NOT NULL,
+				timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+		`,
+	},
+	{
+		ID:   9,
+		Name: "create_order_audits_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS order_audits (
+				id VARCHAR(255) PRIMARY KEY,
+				order_id VARCHAR(255) NOT NULL,
+				user_id VARCHAR(255) NOT NULL,
+				action VARCHAR(100) NOT NULL,
+				previous_state VARCHAR(50) NOT NULL,
+				new_state VARCHAR(50) NOT NULL,
+				ip_address VARCHAR(100) NOT NULL,
+				device_id VARCHAR(100) NOT NULL,
+				result TEXT NOT NULL,
+				timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+		`,
+	},
 }
 
 // RunMigrations executes schema migration steps on the pgx connection pool

@@ -201,6 +201,11 @@ func main() {
 	// V1 API Router Group
 	v1 := r.Group("/api/v1")
 	{
+		// OMS Handlers (Authenticated)
+		omsGroup := v1.Group("")
+		omsGroup.Use(authMiddleware(cfg.JWTSecret))
+		RegisterOMSHandlers(omsGroup)
+
 		// Auth Routes
 		auth := v1.Group("/auth")
 		{
