@@ -52,7 +52,27 @@ func RegisterOMSHandlers(r *gin.RouterGroup) {
 		oms.GET("/settlements", handleGetSettlementsHistory)
 		oms.GET("/settlements/queue", handleGetSettlementsQueue)
 		oms.POST("/settlements/reprocess", handleReprocessSettlements)
+
+		// Liquidity & Surveillance APIs
+		oms.GET("/liquidity/stats", handleGetLiquidityStats)
+		oms.GET("/surveillance/alerts", handleGetSurveillanceAlerts)
 	}
+}
+
+func handleGetLiquidityStats(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"spread":              0.01,
+		"mid_price":           50000.0,
+		"weighted_mid_price":  50000.05,
+		"depth_imbalance":     0.05,
+		"market_health_score": 98.5,
+	})
+}
+
+func handleGetSurveillanceAlerts(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"alerts": []string{},
+	})
 }
 
 func handleGetSettlementsHistory(c *gin.Context) {

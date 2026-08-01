@@ -306,6 +306,64 @@ var schemaMigrations = []Migration{
 			);
 		`,
 	},
+	{
+		ID:   18,
+		Name: "create_liquidity_metrics_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS liquidity_metrics (
+				id VARCHAR(255) PRIMARY KEY,
+				symbol VARCHAR(100) NOT NULL,
+				spread DECIMAL(36, 18) NOT NULL,
+				mid_price DECIMAL(36, 18) NOT NULL,
+				weighted_mid_price DECIMAL(36, 18) NOT NULL,
+				depth_imbalance DECIMAL(10, 8) NOT NULL,
+				market_health_score DECIMAL(5, 2) NOT NULL,
+				timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+		`,
+	},
+	{
+		ID:   19,
+		Name: "create_spread_history_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS spread_history (
+				id VARCHAR(255) PRIMARY KEY,
+				symbol VARCHAR(100) NOT NULL,
+				bid DECIMAL(36, 18) NOT NULL,
+				ask DECIMAL(36, 18) NOT NULL,
+				spread DECIMAL(36, 18) NOT NULL,
+				timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+		`,
+	},
+	{
+		ID:   20,
+		Name: "create_depth_history_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS depth_history (
+				id VARCHAR(255) PRIMARY KEY,
+				symbol VARCHAR(100) NOT NULL,
+				bid_volume DECIMAL(36, 18) NOT NULL,
+				ask_volume DECIMAL(36, 18) NOT NULL,
+				timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+		`,
+	},
+	{
+		ID:   21,
+		Name: "create_surveillance_alerts_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS surveillance_alerts (
+				id VARCHAR(255) PRIMARY KEY,
+				symbol VARCHAR(100) NOT NULL,
+				user_id VARCHAR(255) NOT NULL,
+				pattern VARCHAR(100) NOT NULL,
+				details TEXT NOT NULL,
+				severity VARCHAR(50) NOT NULL,
+				timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+		`,
+	},
 }
 
 // RunMigrations executes schema migration steps on the pgx connection pool

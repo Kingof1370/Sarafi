@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"math"
 	"strconv"
 	"testing"
 	"time"
@@ -421,5 +422,71 @@ func TestAssetReservationsAndPnL(t *testing.T) {
 	pos := pe.GetPosition(userID, "BTC-USDT")
 	if pos.RealizedPnL != 2000.0 {
 		t.Errorf("Expected 2000.0 realized PnL, got %f", pos.RealizedPnL)
+	}
+}
+
+func TestLiquidityAnalytics(t *testing.T) {
+	matcher := NewMatcher("BTC-USDT")
+	le := NewLiquidityEngine()
+
+	// Empty books stats
+	stats := le.AnalyzeDepth(matcher)
+	if stats.BestBid != 0.0 || stats.BestAsk != 0.0 {
+		t.Error("Expected empty book stats to return 0.0")
+	}
+
+	// Insert Bid and Ask
+	buyOrder := &types.Order{ID: "buy_liq", Side: types.SideBuy, Type: types.TypeLimit, Price: 50000.0, Quantity: 2.0}
+	sellOrder := &types.Order{ID: "sell_liq", Side: types.SideSell, Type: types.TypeLimit, Price: 50100.0, Quantity: 1.0}
+
+	matcher.MatchOrder(buyOrder)
+	matcher.MatchOrder(sellOrder)
+
+	stats = le.AnalyzeDepth(matcher)
+	if stats.BestBid != 50000.0 || stats.BestAsk != 50100.0 {
+		t.Errorf("Spread best bid/ask mismatch: bid %f, ask %f", stats.BestBid, stats.BestAsk)
+	}
+
+	if stats.Spread != 100.0 || stats.MidPrice != 50050.0 {
+		t.Errorf("Mid price stats calculation mismatch: spread %f, mid %f", stats.Spread, stats.MidPrice)
+	}
+
+	// Weighted Mid: (50000 * 1.0 + 50100 * 2.0) / 3.0 = 50066.66
+	expectedWeighted := (50000.0*1.0 + 50100.0*2.0) / 3.0
+	if math.Abs(stats.WeightedMidPrice-expectedWeighted) > 1e-2 {
+		t.Errorf("Weighted mid price mismatch: got %f, expected %f", stats.WeightedMidPrice, expectedWeighted)
+	}
+}
+
+func TestMarketSurveillanceWashTrading(t *testing.T) {
+	le := NewLiquidityEngine()
+	trade := &types.Trade{
+		ID:        "t_surv_1",
+		Symbol:    "BTC-USDT",
+		BuyerID:   "user_manipulator",
+		SellerID:  "user_manipulator",
+		Price:     50000.0,
+		Quantity:  1.0,
+	}
+
+	le.CheckSurveillance(trade)
+	alerts := le.GetAlerts()
+	if len(alerts) != 1 || alerts[0].Pattern != "WASH_TRADING" {
+		t.Error("Expected wash trading manipulation alert to be flagged")
+	}
+}
+
+func TestMarketSurveillanceVelocityAbuse(t *testing.T) {
+	le := NewLiquidityEngine()
+	userID := "user_bot"
+
+	// Trigger cancel quote stuffing warning
+	for i := 0; i < 50; i++ {
+		le.FlagAbnormalVelocity(userID, "BTC-USDT", "CANCEL")
+	}
+
+	alerts := le.GetAlerts()
+	if len(alerts) == 0 || alerts[0].Pattern != "ABNORMAL_CANCELLATION" {
+		t.Error("Expected abnormal cancellations rate spoofing alert to be flagged")
 	}
 }
