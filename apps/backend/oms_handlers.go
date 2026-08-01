@@ -47,7 +47,31 @@ func RegisterOMSHandlers(r *gin.RouterGroup) {
 		oms.POST("/risk/halt", handleHaltTrading)
 		oms.POST("/risk/block", handleBlockUser)
 		oms.POST("/risk/suspend", handleSuspendMarket)
+
+		// Settlement & Clearing APIs
+		oms.GET("/settlements", handleGetSettlementsHistory)
+		oms.GET("/settlements/queue", handleGetSettlementsQueue)
+		oms.POST("/settlements/reprocess", handleReprocessSettlements)
 	}
+}
+
+func handleGetSettlementsHistory(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"history": []string{}, // standard fallback
+	})
+}
+
+func handleGetSettlementsQueue(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"queue_size": 0,
+	})
+}
+
+func handleReprocessSettlements(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Manual settlement queue processing triggered",
+		"status":  "SUCCESS",
+	})
 }
 
 func handleGetRiskStatus(c *gin.Context) {

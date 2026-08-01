@@ -245,6 +245,67 @@ var schemaMigrations = []Migration{
 			);
 		`,
 	},
+	{
+		ID:   14,
+		Name: "create_settlements_queue_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS settlements_queue (
+				id VARCHAR(255) PRIMARY KEY,
+				trade_id VARCHAR(255) NOT NULL,
+				status VARCHAR(50) NOT NULL,
+				retries INT DEFAULT 0 NOT NULL,
+				max_retries INT DEFAULT 3 NOT NULL,
+				error_msg TEXT DEFAULT '' NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+		`,
+	},
+	{
+		ID:   15,
+		Name: "create_settlements_history_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS settlements_history (
+				id VARCHAR(255) PRIMARY KEY,
+				trade_id VARCHAR(255) NOT NULL,
+				buyer_id VARCHAR(255) NOT NULL,
+				seller_id VARCHAR(255) NOT NULL,
+				price DECIMAL(36, 18) NOT NULL,
+				quantity DECIMAL(36, 18) NOT NULL,
+				status VARCHAR(50) NOT NULL,
+				completed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+		`,
+	},
+	{
+		ID:   16,
+		Name: "create_fee_ledgers_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS fee_ledgers (
+				id VARCHAR(255) PRIMARY KEY,
+				trade_id VARCHAR(255) NOT NULL,
+				user_id VARCHAR(255) NOT NULL,
+				asset VARCHAR(50) NOT NULL,
+				amount DECIMAL(36, 18) NOT NULL,
+				role VARCHAR(50) NOT NULL,
+				timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+		`,
+	},
+	{
+		ID:   17,
+		Name: "create_accounting_reconciliations_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS accounting_reconciliations (
+				id VARCHAR(255) PRIMARY KEY,
+				batch_id VARCHAR(255) NOT NULL,
+				total_debit DECIMAL(36, 18) NOT NULL,
+				total_credit DECIMAL(36, 18) NOT NULL,
+				total_fee DECIMAL(36, 18) NOT NULL,
+				is_reconciled BOOLEAN DEFAULT TRUE NOT NULL,
+				timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+		`,
+	},
 }
 
 // RunMigrations executes schema migration steps on the pgx connection pool

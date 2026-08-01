@@ -264,9 +264,14 @@ func TestSettlementEngine(t *testing.T) {
 		SellerFee: 50.0,
 	}
 
-	err := se.SettleExecution(context.Background(), exec, "BTC", "USDT")
-	if err != nil {
-		t.Fatalf("Settlement should pass, got: %v", err)
+	job := se.QueueSettlement(exec, "BTC", "USDT")
+	if job.Status != SettlePending {
+		t.Errorf("Expected pending job status, got %s", job.Status)
+	}
+
+	success, fail := se.ProcessQueue(context.Background())
+	if success != 1 || fail != 0 {
+		t.Fatalf("Expected 1 successful settlement, got success=%d, fail=%d", success, fail)
 	}
 
 	if se.GetSettledCount() != 1 {

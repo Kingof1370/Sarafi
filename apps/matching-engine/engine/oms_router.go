@@ -88,9 +88,11 @@ func (or *OMSRouter) ProcessIncomingOrder(ctx context.Context, order *AdvancedOr
 		executions := or.execution.ProcessTrades(matches, quoteAsset, baseAsset)
 
 		for _, exec := range executions {
-			// Persist balance adjustments via double-entry sql pool
-			_ = or.settlement.SettleExecution(ctx, exec, baseAsset, quoteAsset)
+			// Persist balance adjustments via asynchronous queue clearing
+			or.settlement.QueueSettlement(exec, baseAsset, quoteAsset)
 		}
+		// Clear pending jobs queue
+		_, _ = or.settlement.ProcessQueue(ctx)
 
 		// Update order fill state
 		order.FilledQty = legacyOrder.FilledQty

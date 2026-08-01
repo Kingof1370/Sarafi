@@ -42,6 +42,26 @@ func (ee *EventsEngine) PublishTradeMatch(ctx context.Context, exec *Execution) 
 	return nil
 }
 
+// PublishSettlementState broadcasts clearing queue updates to the event bus
+func (ee *EventsEngine) PublishSettlementState(ctx context.Context, jobID string, status string, payload interface{}) error {
+	ee.mu.Lock()
+	defer ee.mu.Unlock()
+
+	if ee.producer != nil {
+		event := types.KafkaEvent{
+			Type:      types.EventType("SETTLEMENT_" + status),
+			Payload:   payload,
+			Timestamp: time.Now(),
+		}
+		err := ee.producer.Publish(ctx, "velyxora-settlement", jobID, event)
+		if err != nil {
+			return fmt.Errorf("failed to publish settlement status: %w", err)
+		}
+	}
+
+	return nil
+}
+
 // PublishOMSStateChange broadcasts custom transition updates downstream
 func (ee *EventsEngine) PublishOMSStateChange(ctx context.Context, orderID string, action string, payload interface{}) error {
 	ee.mu.Lock()
