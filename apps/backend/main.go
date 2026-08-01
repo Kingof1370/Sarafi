@@ -69,6 +69,11 @@ func main() {
 	} else {
 		defer db.Close()
 		log.Info("PostgreSQL connection pool initialized successfully.")
+		// Run database schema migrations
+		err = database.RunMigrations(context.Background(), db)
+		if err != nil {
+			log.Error(fmt.Sprintf("Database migrations failed: %v", err))
+		}
 	}
 
 	// 4. Setup Redis Connection
@@ -90,6 +95,10 @@ func main() {
 
 	// 6. Setup Rate Limiter
 	limiter := common.NewRateLimiter(100, time.Minute)
+
+	// 6.5 Setup WebSocket Gateway (P005 real-time core)
+	wsGateway := NewWSGateway(cfg.JWTSecret)
+	go wsGateway.Run()
 
 	// 7. Bootstrap Router
 	gin.SetMode(gin.ReleaseMode)
@@ -185,6 +194,9 @@ func main() {
 	r.GET("/metrics", func(c *gin.Context) {
 		c.String(http.StatusOK, "# HELP velyxora_api_gateway_uptime Gateway uptime counter\n# TYPE velyxora_api_gateway_uptime counter\nvelyxora_api_gateway_uptime 1.0\n")
 	})
+
+	// Real-time Gateway WebSocket Core
+	r.GET("/ws", wsGateway.HandleConnection)
 
 	// V1 API Router Group
 	v1 := r.Group("/api/v1")

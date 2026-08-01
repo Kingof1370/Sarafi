@@ -6,7 +6,7 @@ import (
 )
 
 func TestBalanceEngineDoubleEntryReconciliation(t *testing.T) {
-	be := NewBalanceEngine()
+	be := NewBalanceEngine(nil)
 	ctx := context.Background()
 
 	// Settle debit and credit safely

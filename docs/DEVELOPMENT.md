@@ -26,6 +26,20 @@ npm run dev
 
 ---
 
+## Database Schemas & Migrations
+Velyxora implements a native auto-migration system in `packages/database/migrations.go`.
+Upon bootstrap, the API Gateway runs:
+```go
+err = database.RunMigrations(context.Background(), db)
+```
+This automatically sets up all required database tables (`users`, `balances`, `ledger_entries`, `deposits`, and `withdrawals`) safely and idempotently.
+
+## Performance Benchmarking
+To measure matching engine performance and latency:
+```bash
+go test -bench=. -benchmem ./apps/matching-engine
+```
+
 ## Code Standards
 * Run standard formatting checks: `go fmt ./...`
 * Linter validation: `go vet ./...`

@@ -96,6 +96,21 @@ type UserAPIKey struct {
 	ExpiresAt   time.Time `json:"expires_at" db:"expires_at"`
 }
 
+// OrderBookLevel represents a single price level in the L2 stream
+type OrderBookLevel struct {
+	Price    float64 `json:"price"`
+	Quantity float64 `json:"quantity"`
+}
+
+// OrderBookL2 represents Level 2 market depth snapshots
+type OrderBookL2 struct {
+	Symbol    string            `json:"symbol"`
+	Bids      []OrderBookLevel  `json:"bids"`
+	Asks      []OrderBookLevel  `json:"asks"`
+	Sequence  int64             `json:"sequence"`
+	Timestamp time.Time         `json:"timestamp"`
+}
+
 // LedgerEntryType defines debit or credit states
 type LedgerEntryType string
 

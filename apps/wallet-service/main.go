@@ -21,17 +21,115 @@ type BalanceEngine struct {
 	mu       sync.Mutex
 	balances map[string]*types.Balance // key: "userID_asset"
 	ledger   []*types.LedgerEntry
+	db       *database.DB
 }
 
-func NewBalanceEngine() *BalanceEngine {
+func NewBalanceEngine(db *database.DB) *BalanceEngine {
 	return &BalanceEngine{
 		balances: make(map[string]*types.Balance),
 		ledger:   make([]*types.LedgerEntry, 0),
+		db:       db,
 	}
 }
 
 // ProcessDoubleEntry forces absolute balance matches to ledger debits/credits to enforce financial safety
 func (be *BalanceEngine) ProcessDoubleEntry(ctx context.Context, txID string, debitUser, creditUser string, asset string, amount float64, description string) error {
+	// If PostgreSQL database connection pool is available, use real transactional SQL persistence
+	if be.db != nil {
+		tx, err := be.db.Pool.Begin(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to begin ledger transaction: %w", err)
+		}
+		defer tx.Rollback(ctx)
+
+		// Helper to fetch and lock or insert initial balance
+		getAndLockBalance := func(userID, ast string) (*types.Balance, error) {
+			var bal types.Balance
+			err := tx.QueryRow(ctx,
+				"SELECT user_id, asset, available, locked, pending, reserved, total FROM balances WHERE user_id = $1 AND asset = $2 FOR UPDATE",
+				userID, ast).Scan(&bal.UserID, &bal.Asset, &bal.Available, &bal.Locked, &bal.Pending, &bal.Reserved, &bal.Total)
+
+			if err != nil {
+				// Row does not exist, initialize a new default balance row for the user
+				initialAvailable := 1000.0 // Default onboarding mock balance
+				_, errInsert := tx.Exec(ctx,
+					"INSERT INTO balances (user_id, asset, available, locked, pending, reserved, total) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+					userID, ast, initialAvailable, 0.0, 0.0, 0.0, initialAvailable)
+				if errInsert != nil {
+					return nil, fmt.Errorf("failed to insert initial balance: %w", errInsert)
+				}
+				bal = types.Balance{
+					UserID:    userID,
+					Asset:     ast,
+					Available: initialAvailable,
+					Total:     initialAvailable,
+				}
+			}
+			return &bal, nil
+		}
+
+		// Fetch and lock both balances
+		debitBal, err := getAndLockBalance(debitUser, asset)
+		if err != nil {
+			return err
+		}
+
+		creditBal, err := getAndLockBalance(creditUser, asset)
+		if err != nil {
+			return err
+		}
+
+		// Enforce safety constraints
+		if debitBal.Available < amount {
+			return fmt.Errorf("insufficient available balance: user %s has %f, requested %f", debitUser, debitBal.Available, amount)
+		}
+
+		// Settle and update balances
+		debitBal.Available -= amount
+		debitBal.Total -= amount
+
+		creditBal.Available += amount
+		creditBal.Total += amount
+
+		_, err = tx.Exec(ctx,
+			"UPDATE balances SET available = $1, total = $2, updated_at = NOW() WHERE user_id = $3 AND asset = $4",
+			debitBal.Available, debitBal.Total, debitUser, asset)
+		if err != nil {
+			return fmt.Errorf("failed to update debit user balance: %w", err)
+		}
+
+		_, err = tx.Exec(ctx,
+			"UPDATE balances SET available = $1, total = $2, updated_at = NOW() WHERE user_id = $3 AND asset = $4",
+			creditBal.Available, creditBal.Total, creditUser, asset)
+		if err != nil {
+			return fmt.Errorf("failed to update credit user balance: %w", err)
+		}
+
+		// Generate Ledger Entries
+		debitEntryID := fmt.Sprintf("ent_deb_%d", time.Now().UnixNano())
+		_, err = tx.Exec(ctx,
+			"INSERT INTO ledger_entries (id, ledger_tx_id, user_id, asset, type, amount, description, timestamp) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())",
+			debitEntryID, txID, debitUser, asset, string(types.Debit), amount, description)
+		if err != nil {
+			return fmt.Errorf("failed to write debit ledger entry: %w", err)
+		}
+
+		creditEntryID := fmt.Sprintf("ent_cred_%d", time.Now().UnixNano())
+		_, err = tx.Exec(ctx,
+			"INSERT INTO ledger_entries (id, ledger_tx_id, user_id, asset, type, amount, description, timestamp) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())",
+			creditEntryID, txID, creditUser, asset, string(types.Credit), amount, description)
+		if err != nil {
+			return fmt.Errorf("failed to write credit ledger entry: %w", err)
+		}
+
+		// Commit complete atomic settlement
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("failed to commit ledger transaction: %w", err)
+		}
+		return nil
+	}
+
+	// Dynamic Fallback to local thread-safe memory storage if the Postgres database is absent/offline
 	be.mu.Lock()
 	defer be.mu.Unlock()
 
@@ -106,7 +204,9 @@ func main() {
 	defer producer.Close()
 
 	// Connect to Database
-	db, err := database.NewConnectionPool(database.Config{
+	var db *database.DB
+	var dbErr error
+	db, dbErr = database.NewConnectionPool(database.Config{
 		Host:     getEnv("DB_HOST", "localhost"),
 		Port:     5432,
 		User:     getEnv("DB_USER", "postgres"),
@@ -115,13 +215,14 @@ func main() {
 		SSLMode:  "disable",
 	})
 
-	if err != nil {
-		log.Warn(fmt.Sprintf("Failed to connect to PG pool, operating in Mock local transaction memory state: %v", err))
+	if dbErr != nil {
+		log.Warn(fmt.Sprintf("Failed to connect to PG pool, operating in Mock local transaction memory state: %v", dbErr))
+		db = nil
 	} else {
 		defer db.Close()
 	}
 
-	be := NewBalanceEngine()
+	be := NewBalanceEngine(db)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -137,7 +238,7 @@ func main() {
 
 	log.Info("Listening to trade results on Kafka to settle balances...")
 
-	err = consumer.Consume(ctx, func(key string, value []byte) error {
+	err := consumer.Consume(ctx, func(key string, value []byte) error {
 		var event types.KafkaEvent
 		if err := json.Unmarshal(value, &event); err != nil {
 			log.Error(fmt.Sprintf("Failed to parse Kafka event: %v", err))
