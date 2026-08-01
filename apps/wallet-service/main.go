@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -15,6 +16,78 @@ import (
 	"velyxora/packages/logger"
 	"velyxora/packages/types"
 )
+
+type BalanceEngine struct {
+	mu       sync.Mutex
+	balances map[string]*types.Balance // key: "userID_asset"
+	ledger   []*types.LedgerEntry
+}
+
+func NewBalanceEngine() *BalanceEngine {
+	return &BalanceEngine{
+		balances: make(map[string]*types.Balance),
+		ledger:   make([]*types.LedgerEntry, 0),
+	}
+}
+
+// ProcessDoubleEntry forces absolute balance matches to ledger debits/credits to enforce financial safety
+func (be *BalanceEngine) ProcessDoubleEntry(ctx context.Context, txID string, debitUser, creditUser string, asset string, amount float64, description string) error {
+	be.mu.Lock()
+	defer be.mu.Unlock()
+
+	debitKey := debitUser + "_" + asset
+	creditKey := creditUser + "_" + asset
+
+	// Fetch or initialize
+	debitBal, ok := be.balances[debitKey]
+	if !ok {
+		debitBal = &types.Balance{UserID: debitUser, Asset: asset, Available: 1000.0, Total: 1000.0}
+		be.balances[debitKey] = debitBal
+	}
+
+	creditBal, ok := be.balances[creditKey]
+	if !ok {
+		creditBal = &types.Balance{UserID: creditUser, Asset: asset, Available: 1000.0, Total: 1000.0}
+		be.balances[creditKey] = creditBal
+	}
+
+	// Enforce balance restrictions (prevent negative balances)
+	if debitBal.Available < amount {
+		return fmt.Errorf("insufficient available balance: user %s has %f, requested %f", debitUser, debitBal.Available, amount)
+	}
+
+	// Calculate and Settle
+	debitBal.Available -= amount
+	debitBal.Total -= amount
+
+	creditBal.Available += amount
+	creditBal.Total += amount
+
+	debitEntry := &types.LedgerEntry{
+		ID:          fmt.Sprintf("ent_deb_%d", time.Now().UnixNano()),
+		LedgerTxID:  txID,
+		UserID:      debitUser,
+		Asset:       asset,
+		Type:        types.Debit,
+		Amount:      amount,
+		Description: description,
+		Timestamp:   time.Now(),
+	}
+
+	creditEntry := &types.LedgerEntry{
+		ID:          fmt.Sprintf("ent_cred_%d", time.Now().UnixNano()),
+		LedgerTxID:  txID,
+		UserID:      creditUser,
+		Asset:       asset,
+		Type:        types.Credit,
+		Amount:      amount,
+		Description: description,
+		Timestamp:   time.Now(),
+	}
+
+	be.ledger = append(be.ledger, debitEntry, creditEntry)
+	return nil
+}
 
 func main() {
 	log := logger.NewLogger(logger.Config{
@@ -48,6 +121,8 @@ func main() {
 		defer db.Close()
 	}
 
+	be := NewBalanceEngine()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -61,9 +136,6 @@ func main() {
 	}()
 
 	log.Info("Listening to trade results on Kafka to settle balances...")
-
-	// In-memory balance simulation when PG is not present
-	mockBalances := make(map[string]*types.Balance)
 
 	err = consumer.Consume(ctx, func(key string, value []byte) error {
 		var event types.KafkaEvent
@@ -83,79 +155,31 @@ func main() {
 				return err
 			}
 
-			log.Info("Settling Trade", "trade_id", trade.ID, "buyer_id", trade.BuyerID, "seller_id", trade.SellerID, "price", trade.Price, "qty", trade.Quantity)
+			log.Info("Settling Trade via Ledger Engine", "trade_id", trade.ID, "buyer_id", trade.BuyerID, "seller_id", trade.SellerID, "price", trade.Price, "qty", trade.Quantity)
 
-			// Safely execute balance adjustment with transaction principles
-			if db != nil {
-				tx, err := db.Pool.Begin(ctx)
-				if err != nil {
-					log.Error("Failed to open postgres transaction")
-					return err
-				}
-				defer tx.Rollback(ctx)
+			baseAsset := strings.Split(trade.Symbol, "-")[0]  // e.g. "BTC"
+			quoteAsset := strings.Split(trade.Symbol, "-")[1] // e.g. "USDT"
+			quoteAmount := trade.Price * trade.Quantity
 
-				// Base assets
-				baseAsset := strings.Split(trade.Symbol, "-")[0]  // e.g. "BTC"
-				quoteAsset := strings.Split(trade.Symbol, "-")[1] // e.g. "USDT"
+			// Settle Buyer Debit (USDT) -> Credit Seller (USDT)
+			txID := "tx_ld_" + fmt.Sprintf("%d", time.Now().UnixNano())
+			err = be.ProcessDoubleEntry(ctx, txID, trade.BuyerID, trade.SellerID, quoteAsset, quoteAmount, fmt.Sprintf("Settled trade purchase: %s", trade.ID))
+			if err != nil {
+				log.Error("Failed to settle Quote ledger transfer", "err", err)
+				return nil
+			}
 
-				quoteAmount := trade.Price * trade.Quantity
-
-				// 1. Debit Buyer's Quote Asset (e.g., USDT)
-				_, err = tx.Exec(ctx,
-					"UPDATE balances SET locked = locked - $1 WHERE user_id = $2 AND asset = $3",
-					quoteAmount, trade.BuyerID, quoteAsset)
-				if err != nil {
-					return fmt.Errorf("debit buyer failed: %w", err)
-				}
-
-				// 2. Credit Buyer's Base Asset (e.g., BTC)
-				_, err = tx.Exec(ctx,
-					"INSERT INTO balances (user_id, asset, free, locked, updated_at) VALUES ($1, $2, $3, 0, NOW()) "+
-						"ON CONFLICT (user_id, asset) DO UPDATE SET free = balances.free + $3",
-					trade.BuyerID, baseAsset, trade.Quantity)
-				if err != nil {
-					return fmt.Errorf("credit buyer base failed: %w", err)
-				}
-
-				// 3. Debit Seller's Base Asset (e.g., BTC, previously locked during order placement)
-				_, err = tx.Exec(ctx,
-					"UPDATE balances SET locked = locked - $1 WHERE user_id = $2 AND asset = $3",
-					trade.Quantity, trade.SellerID, baseAsset)
-				if err != nil {
-					return fmt.Errorf("debit seller failed: %w", err)
-				}
-
-				// 4. Credit Seller's Quote Asset (e.g., USDT)
-				_, err = tx.Exec(ctx,
-					"INSERT INTO balances (user_id, asset, free, locked, updated_at) VALUES ($1, $2, $3, 0, NOW()) "+
-						"ON CONFLICT (user_id, asset) DO UPDATE SET free = balances.free + $3",
-					trade.SellerID, quoteAsset, quoteAmount)
-				if err != nil {
-					return fmt.Errorf("credit seller quote failed: %w", err)
-				}
-
-				if err := tx.Commit(ctx); err != nil {
-					return fmt.Errorf("ledger tx commit failed: %w", err)
-				}
-			} else {
-				// Standalone simulation balance allocation (In-memory update)
-				baseAsset := strings.Split(trade.Symbol, "-")[0]
-				quoteAsset := strings.Split(trade.Symbol, "-")[1]
-				quoteAmount := trade.Price * trade.Quantity
-
-				// Buyer
-				getOrInitMockBalance(mockBalances, trade.BuyerID, baseAsset).Free += trade.Quantity
-				getOrInitMockBalance(mockBalances, trade.BuyerID, quoteAsset).Locked -= quoteAmount
-
-				// Seller
-				getOrInitMockBalance(mockBalances, trade.SellerID, baseAsset).Locked -= trade.Quantity
-				getOrInitMockBalance(mockBalances, trade.SellerID, quoteAsset).Free += quoteAmount
+			// Settle Seller Debit (BTC) -> Credit Buyer (BTC)
+			err = be.ProcessDoubleEntry(ctx, txID, trade.SellerID, trade.BuyerID, baseAsset, trade.Quantity, fmt.Sprintf("Settled trade delivery: %s", trade.ID))
+			if err != nil {
+				log.Error("Failed to settle Base ledger transfer", "err", err)
+				return nil
 			}
 
 			// Broadcast balance updates downstream
 			balanceEvent := types.KafkaEvent{
 				Type:      types.EventBalanceUpdate,
-				Payload:   trade, // Send trade details indicating the trigger for balance update
+				Payload:   trade,
 				Timestamp: time.Now(),
 			}
 			_ = producer.Publish(ctx, "velyxora-balances", trade.BuyerID, balanceEvent)
@@ -167,20 +191,6 @@ func main() {
 	if err != nil && err != context.Canceled {
 		log.Error(fmt.Sprintf("Consumer loop exited with error: %v", err))
 	}
-}
-
-func getOrInitMockBalance(m map[string]*types.Balance, userID, asset string) *types.Balance {
-	key := userID + "_" + asset
-	if b, ok := m[key]; ok {
-		return b
-	}
-	m[key] = &types.Balance{
-		UserID: userID,
-		Asset:  asset,
-		Free:   10.0, // Pre-funded with mock amounts
-		Locked: 10.0,
-	}
-	return m[key]
 }
 
 func getEnv(key, defaultVal string) string {

@@ -1,20 +1,34 @@
 package main
 
 import (
+	"context"
 	"testing"
-	"velyxora/packages/types"
 )
 
-func TestMockBalanceState(t *testing.T) {
-	mockBalances := make(map[string]*types.Balance)
-	bal := getOrInitMockBalance(mockBalances, "usr1", "BTC")
+func TestBalanceEngineDoubleEntryReconciliation(t *testing.T) {
+	be := NewBalanceEngine()
+	ctx := context.Background()
 
-	if bal.Free != 10.0 {
-		t.Errorf("Expected initialized mock free balance to be 10.0, got %f", bal.Free)
+	// Settle debit and credit safely
+	err := be.ProcessDoubleEntry(ctx, "tx_123", "usr_debit", "usr_credit", "USDT", 250.0, "Secure double entry ledger reconciliation")
+	if err != nil {
+		t.Fatalf("Reconciliation process failed: %v", err)
 	}
 
-	bal.Free += 2.5
-	if getOrInitMockBalance(mockBalances, "usr1", "BTC").Free != 12.5 {
-		t.Errorf("Balance adjustments were not reflected correctly")
+	debitBal := be.balances["usr_debit_USDT"]
+	creditBal := be.balances["usr_credit_USDT"]
+
+	if debitBal.Available != 750.0 {
+		t.Errorf("Expected debit user to have 750.0 left, got %f", debitBal.Available)
+	}
+
+	if creditBal.Available != 1250.0 {
+		t.Errorf("Expected credit user to gain 250.0, got %f", creditBal.Available)
+	}
+
+	// Enforce negative limits
+	err = be.ProcessDoubleEntry(ctx, "tx_124", "usr_debit", "usr_credit", "USDT", 900.0, "Excessive transfer")
+	if err == nil {
+		t.Error("Reconciliation process should block excessive debit operations exceeding total available limit")
 	}
 }
