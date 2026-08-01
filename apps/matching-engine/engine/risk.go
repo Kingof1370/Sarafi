@@ -3,29 +3,91 @@ package engine
 import (
 	"fmt"
 	"sync"
+	"time"
 	"velyxora/packages/types"
 )
 
-// RiskEngine manages pre-trade verification and balance isolation
+// STPMode represents the Self-Trade Prevention configuration
+type STPMode string
+
+const (
+	STP_CancelNewest STPMode = "CANCEL_NEWEST"
+	STP_CancelOldest STPMode = "CANCEL_OLDEST"
+	STP_CancelBoth   STPMode = "CANCEL_BOTH"
+	STP_Allow        STPMode = "ALLOW"
+)
+
+// RiskEngine manages pre-trade validation, post-trade settlement checks, STP, and abuse blocklists
 type RiskEngine struct {
-	mu            sync.RWMutex
-	userBalances  map[string]map[string]float64 // userID -> asset -> available amount
-	activeHolds   map[string]map[string]float64 // userID -> asset -> total held for active orders
-	maxPriceLimit float64
-	minPriceLimit float64
+	mu               sync.RWMutex
+	userBalances     map[string]map[string]float64 // userID -> asset -> available amount
+	activeHolds      map[string]map[string]float64 // userID -> asset -> held amount
+	dailyVolume      map[string]float64            // userID -> cumulative daily USD volume
+	dailyLimits      map[string]float64            // userID -> max daily volume limits
+	requestTracks    map[string][]time.Time        // userID/IP -> request timestamps
+	blockedAccounts  map[string]bool               // userID -> blocked status
+	suspendedMarkets map[string]bool               // symbol -> suspended status
+
+	// Price Protections
+	marketReferencePrices map[string]float64 // symbol -> last index price
+	priceBandPercentage   float64            // e.g. 0.10 (10% deviation limits)
+	tradingHalted         bool
+	stpMode               STPMode
 }
 
-// NewRiskEngine creates a new pre-trade Risk validator
+// NewRiskEngine creates an upgraded Enterprise Risk and Abuse protection engine
 func NewRiskEngine(minPrice, maxPrice float64) *RiskEngine {
 	return &RiskEngine{
-		userBalances:  make(map[string]map[string]float64),
-		activeHolds:   make(map[string]map[string]float64),
-		minPriceLimit: minPrice,
-		maxPriceLimit: maxPrice,
+		userBalances:          make(map[string]map[string]float64),
+		activeHolds:           make(map[string]map[string]float64),
+		dailyVolume:           make(map[string]float64),
+		dailyLimits:           make(map[string]float64),
+		requestTracks:         make(map[string][]time.Time),
+		blockedAccounts:       make(map[string]bool),
+		suspendedMarkets:      make(map[string]bool),
+		marketReferencePrices: make(map[string]float64),
+		priceBandPercentage:   0.10, // Default 10% price band
+		tradingHalted:         false,
+		stpMode:               STP_CancelNewest,
 	}
 }
 
-// DepositAsset sets or updates a user balance for risk calculations
+// SetSTPMode configures the Self-Trade Prevention policy
+func (re *RiskEngine) SetSTPMode(mode STPMode) {
+	re.mu.Lock()
+	defer re.mu.Unlock()
+	re.stpMode = mode
+}
+
+// SetHaltStatus triggers global trading halts
+func (re *RiskEngine) SetHaltStatus(halted bool) {
+	re.mu.Lock()
+	defer re.mu.Unlock()
+	re.tradingHalted = halted
+}
+
+// BlockAccount blocks a user from trading
+func (re *RiskEngine) BlockAccount(userID string, blocked bool) {
+	re.mu.Lock()
+	defer re.mu.Unlock()
+	re.blockedAccounts[userID] = blocked
+}
+
+// SuspendMarket suspends trading for a specific symbol
+func (re *RiskEngine) SuspendMarket(symbol string, suspended bool) {
+	re.mu.Lock()
+	defer re.mu.Unlock()
+	re.suspendedMarkets[symbol] = suspended
+}
+
+// SetReferencePrice registers price feeds for band protections
+func (re *RiskEngine) SetReferencePrice(symbol string, price float64) {
+	re.mu.Lock()
+	defer re.mu.Unlock()
+	re.marketReferencePrices[symbol] = price
+}
+
+// DepositAsset sets or updates a user balance
 func (re *RiskEngine) DepositAsset(userID, asset string, amount float64) {
 	re.mu.Lock()
 	defer re.mu.Unlock()
@@ -36,7 +98,7 @@ func (re *RiskEngine) DepositAsset(userID, asset string, amount float64) {
 	re.userBalances[userID][asset] += amount
 }
 
-// GetAvailableBalance returns available balance taking locks into account
+// GetAvailableBalance returns available balance
 func (re *RiskEngine) GetAvailableBalance(userID, asset string) float64 {
 	re.mu.RLock()
 	defer re.mu.RUnlock()
@@ -58,28 +120,62 @@ func (re *RiskEngine) GetAvailableBalance(userID, asset string) float64 {
 	return available
 }
 
-// ValidateOrder performs pre-trade check on price boundaries and sufficient funds
+// ValidateOrder performs intensive pre-trade risk and abuse checks
 func (re *RiskEngine) ValidateOrder(order *types.Order, quoteAsset, baseAsset string, feeRate float64) error {
 	re.mu.Lock()
 	defer re.mu.Unlock()
 
-	// Price Boundary Check
-	if order.Type == types.TypeLimit {
-		if order.Price < re.minPriceLimit || order.Price > re.maxPriceLimit {
-			return fmt.Errorf("order price %f out of permitted limits [%f, %f]", order.Price, re.minPriceLimit, re.maxPriceLimit)
+	// 1. Trading Halt check
+	if re.tradingHalted {
+		return fmt.Errorf("trading is currently halted globally")
+	}
+
+	// 2. Blocklist and suspended markets check
+	if re.blockedAccounts[order.UserID] {
+		return fmt.Errorf("user account %s is blocked due to risk violations", order.UserID)
+	}
+	if re.suspendedMarkets[order.Symbol] {
+		return fmt.Errorf("trading pair %s is currently suspended", order.Symbol)
+	}
+
+	// 3. Spam & Rapid Fire Detection
+	now := time.Now()
+	re.requestTracks[order.UserID] = append(re.requestTracks[order.UserID], now)
+
+	// Filter requests inside the last 1 second window
+	var activeReqs []time.Time
+	for _, t := range re.requestTracks[order.UserID] {
+		if now.Sub(t) < time.Second {
+			activeReqs = append(activeReqs, t)
+		}
+	}
+	re.requestTracks[order.UserID] = activeReqs
+	if len(activeReqs) > 10 { // Max 10 order placements per second to protect against spam
+		return fmt.Errorf("abuse protection: order placement rate exceeded allowed threshold")
+	}
+
+	// 4. Daily Volume Limit verification
+	orderValue := order.Quantity * order.Price
+	userVol := re.dailyVolume[order.UserID]
+	maxVol := re.dailyLimits[order.UserID]
+	if maxVol > 0 && (userVol+orderValue) > maxVol {
+		return fmt.Errorf("daily trading volume limit exceeded: allowed max %f USD", maxVol)
+	}
+
+	// 5. Price Band Protection
+	if order.Type == types.TypeLimit && order.Price > 0 {
+		refPrice := re.marketReferencePrices[order.Symbol]
+		if refPrice > 0 {
+			deviation := (order.Price - refPrice) / refPrice
+			if deviation > re.priceBandPercentage || deviation < -re.priceBandPercentage {
+				return fmt.Errorf("price band protection: order price %f deviates too much from reference %f", order.Price, refPrice)
+			}
 		}
 	}
 
-	// Balance verification
+	// 6. Balance verification
 	if order.Side == types.SideBuy {
-		// Buyer must lock Quote asset = Quantity * Price * (1 + fee)
-		requiredAmount := order.Quantity * order.Price
-		if order.Type == types.TypeLimit {
-			requiredAmount = order.Quantity * order.Price * (1.0 + feeRate)
-		} else {
-			// For market orders we check against the estimated current price or just verify we have funds
-			requiredAmount = order.Quantity * (1.0 + feeRate)
-		}
+		requiredAmount := order.Quantity * order.Price * (1.0 + feeRate)
 
 		available := 0.0
 		if bals, ok := re.userBalances[order.UserID]; ok {
@@ -101,7 +197,6 @@ func (re *RiskEngine) ValidateOrder(order *types.Order, quoteAsset, baseAsset st
 		re.activeHolds[order.UserID][quoteAsset] += requiredAmount
 
 	} else {
-		// Seller must lock Base asset = Quantity
 		requiredAmount := order.Quantity
 
 		available := 0.0
@@ -127,7 +222,7 @@ func (re *RiskEngine) ValidateOrder(order *types.Order, quoteAsset, baseAsset st
 	return nil
 }
 
-// ReleaseHold clears a balance hold after matching or cancellation
+// ReleaseHold clears a balance hold
 func (re *RiskEngine) ReleaseHold(userID, asset string, amount float64) {
 	re.mu.Lock()
 	defer re.mu.Unlock()
@@ -140,7 +235,7 @@ func (re *RiskEngine) ReleaseHold(userID, asset string, amount float64) {
 	}
 }
 
-// UpdateBalance applies actual settlement adjustments to balance sheets
+// UpdateBalance applies actual settlement adjustments
 func (re *RiskEngine) UpdateBalance(userID, asset string, balanceChange float64) {
 	re.mu.Lock()
 	defer re.mu.Unlock()
@@ -152,4 +247,29 @@ func (re *RiskEngine) UpdateBalance(userID, asset string, balanceChange float64)
 	if re.userBalances[userID][asset] < 0 {
 		re.userBalances[userID][asset] = 0
 	}
+}
+
+// TrackVolume accumulates daily trading volumes
+func (re *RiskEngine) TrackVolume(userID string, usdVolume float64) {
+	re.mu.Lock()
+	defer re.mu.Unlock()
+	re.dailyVolume[userID] += usdVolume
+}
+
+// SetDailyLimit configures daily volume caps
+func (re *RiskEngine) SetDailyLimit(userID string, limit float64) {
+	re.mu.Lock()
+	defer re.mu.Unlock()
+	re.dailyLimits[userID] = limit
+}
+
+// VerifySelfTrade implements dynamic self-trade prevention checks
+func (re *RiskEngine) VerifySelfTrade(buyerID, sellerID string) (bool, STPMode) {
+	re.mu.RLock()
+	defer re.mu.RUnlock()
+
+	if buyerID == sellerID {
+		return true, re.stpMode
+	}
+	return false, STP_Allow
 }

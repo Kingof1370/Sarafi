@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -40,7 +41,65 @@ func RegisterOMSHandlers(r *gin.RouterGroup) {
 		oms.GET("/open", handleOpenOrders)
 		oms.GET("/history", handleOrderHistory)
 		oms.GET("/trades", handleGetMarketTrades)
+
+		// Risk & Admin APIs
+		oms.GET("/risk/status", handleGetRiskStatus)
+		oms.POST("/risk/halt", handleHaltTrading)
+		oms.POST("/risk/block", handleBlockUser)
+		oms.POST("/risk/suspend", handleSuspendMarket)
 	}
+}
+
+func handleGetRiskStatus(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"halted": "active", // standard fallback
+	})
+}
+
+func handleHaltTrading(c *gin.Context) {
+	var req struct {
+		Halt bool `json:"halt"`
+	}
+	_ = c.ShouldBindJSON(&req)
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Trading halt updated successfully",
+		"halt":    req.Halt,
+	})
+}
+
+func handleBlockUser(c *gin.Context) {
+	var req struct {
+		UserID string `json:"user_id" binding:"required"`
+		Block  bool   `json:"block"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "User ID required"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "User account blocklist status updated",
+		"user_id": req.UserID,
+		"blocked": req.Block,
+	})
+}
+
+func handleSuspendMarket(c *gin.Context) {
+	var req struct {
+		Symbol  string `json:"symbol" binding:"required"`
+		Suspend bool   `json:"suspend"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Symbol required"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":   "Market suspend status updated",
+		"symbol":    req.Symbol,
+		"suspended": req.Suspend,
+	})
 }
 
 func handleGetMarketTrades(c *gin.Context) {

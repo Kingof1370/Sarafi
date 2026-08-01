@@ -356,3 +356,65 @@ func TestMatchingLatencyPercentiles(t *testing.T) {
 	fmt.Printf("P99 Latency:          %v\n", p99)
 	fmt.Printf("------------------------------------\n")
 }
+
+func TestAdvancedRiskValidationAndProtections(t *testing.T) {
+	re := NewRiskEngine(10.0, 100000.0)
+	userID := "usr_abuse_1"
+
+	re.DepositAsset(userID, "USDT", 100000.0)
+
+	// 1. Test Trading Halt
+	re.SetHaltStatus(true)
+	order := &types.Order{ID: "o_halt", UserID: userID, Symbol: "BTC-USDT", Side: types.SideBuy, Type: types.TypeLimit, Price: 500.0, Quantity: 1.0}
+	err := re.ValidateOrder(order, "USDT", "BTC", 0.002)
+	if err == nil || err.Error() != "trading is currently halted globally" {
+		t.Error("Expected trading halt validation block error")
+	}
+	re.SetHaltStatus(false)
+
+	// 2. Test Blocklist
+	re.BlockAccount(userID, true)
+	err = re.ValidateOrder(order, "USDT", "BTC", 0.002)
+	if err == nil || err.Error() != "user account usr_abuse_1 is blocked due to risk violations" {
+		t.Error("Expected blocked account validation block error")
+	}
+	re.BlockAccount(userID, false)
+
+	// 3. Test Spam Rate Fire Protection
+	for i := 0; i < 11; i++ {
+		ord := &types.Order{ID: "o_spam_" + strconv.Itoa(i), UserID: userID, Symbol: "BTC-USDT", Side: types.SideBuy, Type: types.TypeLimit, Price: 500.0, Quantity: 0.1}
+		err = re.ValidateOrder(ord, "USDT", "BTC", 0.002)
+		if i == 10 && err == nil {
+			t.Error("Expected spam protection rate limit exceed block error")
+		}
+	}
+}
+
+func TestSelfTradePreventionTriggers(t *testing.T) {
+	re := NewRiskEngine(10.0, 100000.0)
+	re.SetSTPMode(STP_CancelNewest)
+
+	isSTP, mode := re.VerifySelfTrade("user_a", "user_a")
+	if !isSTP || mode != STP_CancelNewest {
+		t.Errorf("Expected Self-Trade triggered with CANCEL_NEWEST mode")
+	}
+}
+
+func TestAssetReservationsAndPnL(t *testing.T) {
+	pe := NewPositionEngine()
+	userID := "user_portfolio"
+
+	pe.ReserveAsset(userID, "USDT", 1000.0)
+	pe.LockAsset(userID, "USDT", 500.0)
+	pe.ReleaseLockedAsset(userID, "USDT", 200.0)
+
+	// Buy 1 BTC at 40,000
+	pe.RecordExecution(userID, "BTC-USDT", 1.0, 40000.0)
+	// Sell 1 BTC at 42,000 -> Realized PnL should be +2000.0
+	pe.RecordExecution(userID, "BTC-USDT", -1.0, 42000.0)
+
+	pos := pe.GetPosition(userID, "BTC-USDT")
+	if pos.RealizedPnL != 2000.0 {
+		t.Errorf("Expected 2000.0 realized PnL, got %f", pos.RealizedPnL)
+	}
+}

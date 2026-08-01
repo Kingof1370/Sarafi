@@ -186,6 +186,65 @@ var schemaMigrations = []Migration{
 			);
 		`,
 	},
+	{
+		ID:   10,
+		Name: "create_risk_rules_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS risk_rules (
+				id VARCHAR(255) PRIMARY KEY,
+				symbol VARCHAR(100) NOT NULL,
+				max_order_size DECIMAL(36, 18) NOT NULL,
+				max_daily_volume DECIMAL(36, 18) NOT NULL,
+				max_open_orders INT NOT NULL,
+				price_band_percentage DECIMAL(5, 4) NOT NULL,
+				is_active BOOLEAN DEFAULT TRUE NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+		`,
+	},
+	{
+		ID:   11,
+		Name: "create_risk_events_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS risk_events (
+				id VARCHAR(255) PRIMARY KEY,
+				user_id VARCHAR(255) NOT NULL,
+				event_type VARCHAR(100) NOT NULL,
+				details TEXT NOT NULL,
+				timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+		`,
+	},
+	{
+		ID:   12,
+		Name: "create_risk_violations_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS risk_violations (
+				id VARCHAR(255) PRIMARY KEY,
+				user_id VARCHAR(255) NOT NULL,
+				violation_type VARCHAR(100) NOT NULL,
+				ip_address VARCHAR(100) NOT NULL,
+				details TEXT NOT NULL,
+				timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+		`,
+	},
+	{
+		ID:   13,
+		Name: "create_positions_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS positions (
+				user_id VARCHAR(255) NOT NULL,
+				symbol VARCHAR(100) NOT NULL,
+				size DECIMAL(36, 18) NOT NULL,
+				entry_price DECIMAL(36, 18) NOT NULL,
+				realized_pnl DECIMAL(36, 18) DEFAULT 0.0 NOT NULL,
+				unrealized_pnl DECIMAL(36, 18) DEFAULT 0.0 NOT NULL,
+				updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				PRIMARY KEY (user_id, symbol)
+			);
+		`,
+	},
 }
 
 // RunMigrations executes schema migration steps on the pgx connection pool
