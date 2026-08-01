@@ -13,29 +13,49 @@ type MatchLimit struct {
 	Orders []*types.Order
 }
 
-// Matcher implements the high-speed price-time matching logic
+// Matcher implements the high-speed price-time matching logic with advanced execution modifiers
 type Matcher struct {
-	mu     sync.RWMutex
-	Symbol string
-	Bids   []*MatchLimit // buy orders sorted high to low
-	Asks   []*MatchLimit // sell orders sorted low to high
+	mu          sync.RWMutex
+	Symbol      string
+	Bids        []*MatchLimit // buy orders sorted high to low
+	Asks        []*MatchLimit // sell orders sorted low to high
+	StopOrders  []*types.Order // untriggered stop orders
+	LastPrice   float64
+	SequenceNum int64
 }
 
 // NewMatcher creates a book matching level
 func NewMatcher(symbol string) *Matcher {
 	return &Matcher{
-		Symbol: symbol,
-		Bids:   make([]*MatchLimit, 0),
-		Asks:   make([]*MatchLimit, 0),
+		Symbol:     symbol,
+		Bids:       make([]*MatchLimit, 0),
+		Asks:       make([]*MatchLimit, 0),
+		StopOrders: make([]*types.Order, 0),
 	}
 }
 
-// MatchOrder matches incoming buy/sell orders and outputs executions
+// MatchOrder matches incoming buy/sell orders and outputs executions (Price-Time Priority)
 func (m *Matcher) MatchOrder(order *types.Order) []*types.Trade {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	var trades []*types.Trade
+
+	// Check for FOK (Fill-Or-Kill) condition before matching
+	if order.Type == types.TypeLimit && order.Price > 0 {
+		// FOK check: we must check if there is enough depth immediately available
+		if isFOK(order, m.Bids, m.Asks) {
+			// Fail/Kill the order immediately
+			order.Status = types.StatusRejected
+			return trades
+		}
+	}
+
+	// Post Only Check
+	if isPostOnlyCrossing(order, m.Bids, m.Asks) {
+		order.Status = types.StatusRejected
+		return trades
+	}
 
 	if order.Side == types.SideBuy {
 		// Match against lowest asks first
@@ -65,8 +85,9 @@ func (m *Matcher) MatchOrder(order *types.Order) []*types.Trade {
 					sellOrder.Status = types.StatusPartiallyFilled
 				}
 
+				m.SequenceNum++
 				trade := &types.Trade{
-					ID:          "trd_" + strconv.FormatInt(time.Now().UnixNano(), 10),
+					ID:          "trd_" + strconv.FormatInt(time.Now().UnixNano(), 10) + "_" + strconv.FormatInt(m.SequenceNum, 10),
 					Symbol:      m.Symbol,
 					BuyerID:     order.UserID,
 					SellerID:    sellOrder.UserID,
@@ -77,6 +98,8 @@ func (m *Matcher) MatchOrder(order *types.Order) []*types.Trade {
 					Timestamp:   time.Now(),
 				}
 				trades = append(trades, trade)
+				m.LastPrice = limit.Price
+				m.triggerStopOrders(limit.Price)
 			}
 
 			if len(limit.Orders) == 0 {
@@ -86,7 +109,13 @@ func (m *Matcher) MatchOrder(order *types.Order) []*types.Trade {
 			}
 		}
 
-		// If there's quantity left, place on Bid book (except market orders)
+		// If IOC (Immediate-Or-Cancel) and not fully matched, cancel the remaining quantity
+		if order.FilledQty < order.Quantity && isIOC(order) {
+			order.Status = types.StatusCancelled
+			return trades
+		}
+
+		// If not fully filled, place on Bid book (except market orders)
 		if order.FilledQty < order.Quantity && order.Type == types.TypeLimit {
 			m.addOrderToBook(order, &m.Bids, true)
 		}
@@ -119,8 +148,9 @@ func (m *Matcher) MatchOrder(order *types.Order) []*types.Trade {
 					buyOrder.Status = types.StatusPartiallyFilled
 				}
 
+				m.SequenceNum++
 				trade := &types.Trade{
-					ID:          "trd_" + strconv.FormatInt(time.Now().UnixNano(), 10),
+					ID:          "trd_" + strconv.FormatInt(time.Now().UnixNano(), 10) + "_" + strconv.FormatInt(m.SequenceNum, 10),
 					Symbol:      m.Symbol,
 					BuyerID:     buyOrder.UserID,
 					SellerID:    order.UserID,
@@ -131,6 +161,8 @@ func (m *Matcher) MatchOrder(order *types.Order) []*types.Trade {
 					Timestamp:   time.Now(),
 				}
 				trades = append(trades, trade)
+				m.LastPrice = limit.Price
+				m.triggerStopOrders(limit.Price)
 			}
 
 			if len(limit.Orders) == 0 {
@@ -140,13 +172,26 @@ func (m *Matcher) MatchOrder(order *types.Order) []*types.Trade {
 			}
 		}
 
-		// If there's quantity left, place on Ask book (except market orders)
+		// If IOC (Immediate-Or-Cancel) and not fully matched, cancel the remaining quantity
+		if order.FilledQty < order.Quantity && isIOC(order) {
+			order.Status = types.StatusCancelled
+			return trades
+		}
+
+		// If not fully filled, place on Ask book (except market orders)
 		if order.FilledQty < order.Quantity && order.Type == types.TypeLimit {
 			m.addOrderToBook(order, &m.Asks, false)
 		}
 	}
 
 	return trades
+}
+
+// AddStopOrder registers an untriggered stop order
+func (m *Matcher) AddStopOrder(order *types.Order) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.StopOrders = append(m.StopOrders, order)
 }
 
 // CancelOrder removes an active order from the book levels
@@ -168,6 +213,14 @@ func (m *Matcher) CancelOrder(orderID string) bool {
 			}
 		}
 		return false
+	}
+
+	// Remove from untriggered stop orders
+	for i, ord := range m.StopOrders {
+		if ord.ID == orderID {
+			m.StopOrders = append(m.StopOrders[:i], m.StopOrders[i+1:]...)
+			return true
+		}
 	}
 
 	return removeFromLimits(&m.Bids) || removeFromLimits(&m.Asks)
@@ -222,9 +275,89 @@ func (m *Matcher) addOrderToBook(order *types.Order, limits *[]*MatchLimit, desc
 	*limits = append(*limits, &MatchLimit{Price: price, Orders: []*types.Order{order}})
 }
 
-func min(a, b float64) float64 {
-	if a < b {
-		return a
+// triggerStopOrders monitors the price and enters stop orders into limit book when crossed
+func (m *Matcher) triggerStopOrders(currentPrice float64) {
+	var triggered []*types.Order
+	var remaining []*types.Order
+
+	for _, ord := range m.StopOrders {
+		// Stop condition: e.g. Buy stops triggers when price >= stop price, Sell stops when price <= stop price
+		isTriggered := false
+		if ord.Side == types.SideBuy && currentPrice >= ord.Price {
+			isTriggered = true
+		} else if ord.Side == types.SideSell && currentPrice <= ord.Price {
+			isTriggered = true
+		}
+
+		if isTriggered {
+			triggered = append(triggered, ord)
+		} else {
+			remaining = append(remaining, ord)
+		}
 	}
-	return b
+
+	m.StopOrders = remaining
+
+	// Route triggered stop orders back into match loops
+	for _, ord := range triggered {
+		ord.Type = types.TypeLimit // convert stop trigger to limit order
+		go m.MatchOrder(ord)
+	}
+}
+
+func isIOC(ord *types.Order) bool {
+	return ord.TimeInForce == "IOC"
+}
+
+func isFOK(ord *types.Order, bids, asks []*MatchLimit) bool {
+	if ord.TimeInForce != "FOK" {
+		return false
+	}
+
+	remainingToFill := ord.Quantity - ord.FilledQty
+
+	if ord.Side == types.SideBuy {
+		cumulativeQty := 0.0
+		for _, limit := range asks {
+			if ord.Type == types.TypeLimit && limit.Price > ord.Price {
+				break // Buy price limit reached
+			}
+			for _, bookOrd := range limit.Orders {
+				cumulativeQty += (bookOrd.Quantity - bookOrd.FilledQty)
+				if cumulativeQty >= remainingToFill {
+					return false // FOK satisfies, enough liquidity available
+				}
+			}
+		}
+	} else {
+		cumulativeQty := 0.0
+		for _, limit := range bids {
+			if ord.Type == types.TypeLimit && limit.Price < ord.Price {
+				break // Sell price limit reached
+			}
+			for _, bookOrd := range limit.Orders {
+				cumulativeQty += (bookOrd.Quantity - bookOrd.FilledQty)
+				if cumulativeQty >= remainingToFill {
+					return false // FOK satisfies
+				}
+			}
+		}
+	}
+
+	return true // FOK fails, insufficient immediate liquidity
+}
+
+func isPostOnlyCrossing(ord *types.Order, bids, asks []*MatchLimit) bool {
+	if !ord.PostOnly {
+		return false
+	}
+
+	if ord.Side == types.SideBuy && len(asks) > 0 && ord.Price >= asks[0].Price {
+		return true // would cross and execute immediately
+	}
+	if ord.Side == types.SideSell && len(bids) > 0 && ord.Price <= bids[0].Price {
+		return true // would cross and execute immediately
+	}
+
+	return false
 }

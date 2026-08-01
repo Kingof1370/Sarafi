@@ -56,14 +56,16 @@ func (or *OMSRouter) ProcessIncomingOrder(ctx context.Context, order *AdvancedOr
 	}
 
 	legacyOrder := &types.Order{
-		ID:        order.ID,
-		UserID:    order.UserID,
-		Symbol:    order.Symbol,
-		Side:      types.OrderSide(order.Side),
-		Type:      types.OrderType(order.Type),
-		Price:     order.Price,
-		Quantity:  order.Quantity,
-		FilledQty: order.FilledQty,
+		ID:          order.ID,
+		UserID:      order.UserID,
+		Symbol:      order.Symbol,
+		Side:        types.OrderSide(order.Side),
+		Type:        types.OrderType(order.Type),
+		Price:       order.Price,
+		Quantity:    order.Quantity,
+		FilledQty:   order.FilledQty,
+		TimeInForce: string(order.TimeInForce),
+		PostOnly:    order.PostOnly,
 	}
 
 	err = or.risk.ValidateOrder(legacyOrder, quoteAsset, baseAsset, feeRate)
@@ -139,11 +141,14 @@ func (or *OMSRouter) CancelOrder(orderID, ip, device string) error {
 		return err
 	}
 
-	// Release holds
-	if order.Side == "BUY" {
-		or.risk.ReleaseHold(order.UserID, "USDT", order.Quantity*order.Price)
-	} else {
-		or.risk.ReleaseHold(order.UserID, "BTC", order.Quantity)
+	// Release holds for the remaining unfilled portion only (prevents negative locks/double-spend risk)
+	unfilledQty := order.Quantity - order.FilledQty
+	if unfilledQty > 0 {
+		if order.Side == "BUY" {
+			or.risk.ReleaseHold(order.UserID, "USDT", unfilledQty*order.Price)
+		} else {
+			or.risk.ReleaseHold(order.UserID, "BTC", unfilledQty)
+		}
 	}
 
 	return nil

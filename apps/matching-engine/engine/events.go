@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 	"velyxora/packages/common"
 	"velyxora/packages/types"
 )
@@ -35,6 +36,26 @@ func (ee *EventsEngine) PublishTradeMatch(ctx context.Context, exec *Execution) 
 		err := ee.producer.Publish(ctx, "velyxora-trades", exec.TradeID, event)
 		if err != nil {
 			return fmt.Errorf("failed to publish trade match event: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// PublishOMSStateChange broadcasts custom transition updates downstream
+func (ee *EventsEngine) PublishOMSStateChange(ctx context.Context, orderID string, action string, payload interface{}) error {
+	ee.mu.Lock()
+	defer ee.mu.Unlock()
+
+	if ee.producer != nil {
+		event := types.KafkaEvent{
+			Type:      types.EventType(action),
+			Payload:   payload,
+			Timestamp: time.Now(),
+		}
+		err := ee.producer.Publish(ctx, "velyxora-orders-audit", orderID, event)
+		if err != nil {
+			return fmt.Errorf("failed to publish audit state event: %w", err)
 		}
 	}
 

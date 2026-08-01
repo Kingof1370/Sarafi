@@ -263,6 +263,8 @@ type Order struct {
 	Quantity      float64     `json:"quantity" db:"quantity"`
 	FilledQty     float64     `json:"filled_quantity" db:"filled_quantity"`
 	Status        OrderStatus `json:"status" db:"status"`
+	TimeInForce   string      `json:"time_in_force" db:"time_in_force"`
+	PostOnly      bool        `json:"post_only" db:"post_only"`
 	CreatedAt     time.Time   `json:"created_at" db:"created_at"`
 	UpdatedAt     time.Time   `json:"updated_at" db:"updated_at"`
 }

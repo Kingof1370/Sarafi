@@ -2,7 +2,10 @@ package engine
 
 import (
 	"context"
+	"fmt"
+	"strconv"
 	"testing"
+	"time"
 	"velyxora/packages/types"
 )
 
@@ -298,4 +301,58 @@ func BenchmarkMatchingEnginePipeline(b *testing.B) {
 		}
 		matcher.MatchOrder(buyOrder)
 	}
+}
+
+func TestMatchingLatencyPercentiles(t *testing.T) {
+	// A dedicated functional test that measures and outputs exact latency percentiles (P50, P95, P99)
+	matcher := NewMatcher("BTC-USDT")
+
+	sellOrder := &types.Order{
+		ID:       "sell_p_1",
+		UserID:   "usr_sell",
+		Symbol:   "BTC-USDT",
+		Side:     types.SideSell,
+		Type:     types.TypeLimit,
+		Price:    50000.0,
+		Quantity: 1000000.0,
+	}
+	matcher.MatchOrder(sellOrder)
+
+	iterations := 1000
+	durations := make([]time.Duration, iterations)
+
+	for i := 0; i < iterations; i++ {
+		buyOrder := &types.Order{
+			ID:       "buy_p_" + strconv.Itoa(i),
+			UserID:   "usr_buy",
+			Symbol:   "BTC-USDT",
+			Side:     types.SideBuy,
+			Type:     types.TypeLimit,
+			Price:    50000.0,
+			Quantity: 1.0,
+		}
+
+		start := time.Now()
+		matcher.MatchOrder(buyOrder)
+		durations[i] = time.Since(start)
+	}
+
+	// Sort durations
+	for i := 0; i < len(durations); i++ {
+		for j := i + 1; j < len(durations); j++ {
+			if durations[i] > durations[j] {
+				durations[i], durations[j] = durations[j], durations[i]
+			}
+		}
+	}
+
+	p50 := durations[int(float64(iterations)*0.50)]
+	p95 := durations[int(float64(iterations)*0.95)]
+	p99 := durations[int(float64(iterations)*0.99)]
+
+	fmt.Printf("\n--- VELYXORA LATENCY PERCENTILES ---\n")
+	fmt.Printf("P50 (Median) Latency: %v\n", p50)
+	fmt.Printf("P95 Latency:          %v\n", p95)
+	fmt.Printf("P99 Latency:          %v\n", p99)
+	fmt.Printf("------------------------------------\n")
 }

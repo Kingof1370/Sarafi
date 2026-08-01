@@ -13,6 +13,7 @@ import (
 
 // Global OMSRouter instance for the API Gateway handlers
 var globalOMSRouter *engine.OMSRouter
+var globalMarketServices *engine.MarketServices
 
 func init() {
 	// Initialize full modular trading core engine stack on start
@@ -25,6 +26,7 @@ func init() {
 	settle := engine.NewSettlementEngine(nil)
 
 	globalOMSRouter = engine.NewOMSRouter(sm, val, risk, matcher, exec, settle)
+	globalMarketServices = engine.NewMarketServices()
 }
 
 // RegisterOMSHandlers binds the advanced trading API handlers to the API Gateway router
@@ -37,7 +39,17 @@ func RegisterOMSHandlers(r *gin.RouterGroup) {
 		oms.POST("/orders/cancel-bulk", handleBulkCancel)
 		oms.GET("/open", handleOpenOrders)
 		oms.GET("/history", handleOrderHistory)
+		oms.GET("/trades", handleGetMarketTrades)
 	}
+}
+
+func handleGetMarketTrades(c *gin.Context) {
+	symbol := c.DefaultQuery("symbol", "BTC-USDT")
+	ticker := globalMarketServices.GetTicker(strings.ToUpper(symbol))
+
+	c.JSON(http.StatusOK, gin.H{
+		"ticker": ticker,
+	})
 }
 
 type CreateOrderRequest struct {
@@ -64,7 +76,7 @@ func handleCreateOrder(c *gin.Context) {
 
 	// Build Advanced Order Record
 	order := &engine.AdvancedOrder{
-		ID:            "ord_" + string(rune(time.Now().UnixNano())),
+		ID:            "ord_" + strconv.FormatInt(time.Now().UnixNano(), 10),
 		ClientOrderID: req.ClientOrderID,
 		UserID:        userClaims.UserID,
 		Symbol:        strings.ToUpper(req.Symbol),
@@ -127,7 +139,7 @@ func handleReplaceOrder(c *gin.Context) {
 
 	// Create new Advanced Order
 	newOrder := &engine.AdvancedOrder{
-		ID:            "ord_rep_" + string(rune(time.Now().UnixNano())),
+		ID:            "ord_rep_" + strconv.FormatInt(time.Now().UnixNano(), 10),
 		ClientOrderID: req.ClientOrderID,
 		UserID:        userClaims.UserID,
 		Symbol:        strings.ToUpper(req.Symbol),
