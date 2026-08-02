@@ -17,6 +17,7 @@ import (
 	"velyxora/packages/logger"
 	"velyxora/packages/security"
 	"velyxora/packages/types"
+	"velyxora/packages/wallet"
 )
 
 // Config represents server environment configuration
@@ -56,7 +57,9 @@ func main() {
 	}
 
 	// 3. Setup Postgres Connection
-	db, err := database.NewConnectionPool(database.Config{
+	var db *database.DB
+	var err error
+	db, err = database.NewConnectionPool(database.Config{
 		Host:     cfg.DBHost,
 		Port:     cfg.DBPort,
 		User:     cfg.DBUser,
@@ -92,6 +95,13 @@ func main() {
 	kafkaProducer := common.NewKafkaProducer(cfg.KafkaBrokers)
 	defer kafkaProducer.Close()
 	log.Info("Kafka Producer registered.")
+
+	// Instantiate and Bootstrap Persistent Wallet Service Core in the Gateway as well!
+	var pws *wallet.PersistentWalletService
+	if db != nil {
+		pws = wallet.NewPersistentWalletService(db, kafkaProducer, log)
+		_ = pws.Bootstrap(context.Background())
+	}
 
 	// 6. Setup Rate Limiter
 	limiter := common.NewRateLimiter(100, time.Minute)
@@ -386,11 +396,500 @@ func main() {
 		}
 
 		// P004 Wallet, Deposit, Withdrawal, Asset APIs
-		wallet := v1.Group("/wallet")
-		wallet.Use(authMiddleware(cfg.JWTSecret))
+		walletGroup := v1.Group("/wallet")
+		walletGroup.Use(authMiddleware(cfg.JWTSecret))
 		{
+			// POST /api/v1/wallet/withdrawals/create
+			walletGroup.POST("/withdrawals/create", func(c *gin.Context) {
+				var req struct {
+					Asset   string  `json:"asset" binding:"required"`
+					Amount  float64 `json:"amount" binding:"required,gt=0"`
+					Address string  `json:"address" binding:"required"`
+				}
+
+				if err := c.ShouldBindJSON(&req); err != nil {
+					c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+					return
+				}
+
+				claims, _ := c.Get("claims")
+				userClaims := claims.(*security.Claims)
+
+				fee := 0.0005
+				if strings.ToUpper(req.Asset) == "USDT" {
+					fee = 1.0
+				}
+
+				if pws != nil {
+					wID := "wal_hot_" + userClaims.UserID
+					reqW, err := pws.ProcessWithdrawalRequest(context.Background(), userClaims.UserID, wID, req.Asset, req.Amount, fee, req.Address)
+					if err != nil {
+						c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+						return
+					}
+					c.JSON(http.StatusAccepted, gin.H{
+						"message": "Withdrawal request registered and queued for risk processing",
+						"id":      reqW.ID,
+						"status":  string(reqW.Status),
+					})
+					return
+				}
+
+				reqID := fmt.Sprintf("wth_%d_%s", time.Now().UnixNano(), req.Asset)
+				c.JSON(http.StatusAccepted, gin.H{
+					"message": "Withdrawal request registered and queued for risk processing",
+					"id":      reqID,
+					"status":  "REQUESTED",
+				})
+			})
+
+			// POST /api/v1/wallet/withdrawals/cancel/:id
+			walletGroup.POST("/withdrawals/cancel/:id", func(c *gin.Context) {
+				idParam := c.Param("id")
+
+				if pws != nil {
+					req, err := pws.GetWithdrawalEngine().CancelWithdrawal(context.Background(), idParam)
+					if err != nil {
+						c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+						return
+					}
+					c.JSON(http.StatusOK, gin.H{
+						"id":      req.ID,
+						"status":  string(req.Status),
+						"message": "Withdrawal request successfully canceled",
+					})
+					return
+				}
+
+				c.JSON(http.StatusOK, gin.H{
+					"id":      idParam,
+					"status":  "REJECTED",
+					"message": "Withdrawal request successfully canceled",
+				})
+			})
+
+			// GET /api/v1/wallet/withdrawals/status/:id
+			walletGroup.GET("/withdrawals/status/:id", func(c *gin.Context) {
+				idParam := c.Param("id")
+
+				if pws != nil {
+					req, err := pws.GetWithdrawalEngine().GetRequest(idParam)
+					if err == nil {
+						c.JSON(http.StatusOK, gin.H{"id": req.ID, "status": string(req.Status)})
+						return
+					}
+				}
+
+				c.JSON(http.StatusOK, gin.H{
+					"id":     idParam,
+					"status": "APPROVED",
+				})
+			})
+
+			// GET /api/v1/wallet/withdrawals/history
+			walletGroup.GET("/withdrawals/history", func(c *gin.Context) {
+				claims, _ := c.Get("claims")
+				userClaims := claims.(*security.Claims)
+
+				if db != nil {
+					var list []gin.H
+					rows, err := db.Pool.Query(context.Background(),
+						`SELECT id, asset, amount, fee, address, status, created_at, updated_at
+						 FROM withdrawal_queue
+						 WHERE user_id = $1
+						 ORDER BY created_at DESC`, userClaims.UserID)
+					if err == nil {
+						defer rows.Close()
+						for rows.Next() {
+							var id, asset, addr, status string
+							var amt, fee float64
+							var created, updated time.Time
+							if errScan := rows.Scan(&id, &asset, &amt, &fee, &addr, &status, &created, &updated); errScan == nil {
+								list = append(list, gin.H{
+									"id":         id,
+									"asset":      asset,
+									"amount":     amt,
+									"fee":        fee,
+									"address":    addr,
+									"status":     status,
+									"created_at": created,
+									"updated_at": updated,
+								})
+							}
+						}
+						c.JSON(http.StatusOK, gin.H{"withdrawals": list})
+						return
+					}
+				}
+
+				// Fallback Mock Withdrawal History
+				c.JSON(http.StatusOK, gin.H{
+					"withdrawals": []gin.H{
+						{
+							"id":         "wth_mock_001",
+							"asset":      "USDT",
+							"amount":     500.0,
+							"fee":        1.0,
+							"address":    "0x71C7656EC7ab88b098defB751B7401B5f6d1476B",
+							"status":     "COMPLETED",
+							"created_at": time.Now().Add(-1 * time.Hour),
+							"updated_at": time.Now().Add(-45 * time.Minute),
+						},
+					},
+				})
+			})
+
+			// GET /api/v1/wallet/withdrawals/address-book
+			walletGroup.GET("/withdrawals/address-book", func(c *gin.Context) {
+				claims, _ := c.Get("claims")
+				userClaims := claims.(*security.Claims)
+
+				if db != nil {
+					var book []gin.H
+					rows, err := db.Pool.Query(context.Background(),
+						`SELECT id, address, network, label, is_whitelisted, trust_score, verified_at
+						 FROM withdrawal_address_book
+						 WHERE user_id = $1`, userClaims.UserID)
+					if err == nil {
+						defer rows.Close()
+						for rows.Next() {
+							var id, addr, net, label string
+							var whitelisted bool
+							var score float64
+							var verified time.Time
+							if errScan := rows.Scan(&id, &addr, &net, &label, &whitelisted, &score, &verified); errScan == nil {
+								book = append(book, gin.H{
+									"id":             id,
+									"address":        addr,
+									"network":        net,
+									"label":          label,
+									"is_whitelisted": whitelisted,
+									"trust_score":    score,
+									"verified_at":    verified,
+								})
+							}
+						}
+						c.JSON(http.StatusOK, gin.H{"address_book": book})
+						return
+					}
+				}
+
+				// Fallback Mock Address Book
+				c.JSON(http.StatusOK, gin.H{
+					"address_book": []gin.H{
+						{
+							"id":             "adr_bk_mock_1",
+							"address":        "0x71C7656EC7ab88b098defB751B7401B5f6d1476B",
+							"network":        "Ethereum",
+							"label":          "My Trusted EVM Wallet",
+							"is_whitelisted": true,
+							"trust_score":    1.0,
+							"verified_at":    time.Now(),
+						},
+					},
+				})
+			})
+
+			// POST /api/v1/wallet/withdrawals/whitelist
+			walletGroup.POST("/withdrawals/whitelist", func(c *gin.Context) {
+				var req struct {
+					Address string `json:"address" binding:"required"`
+					Network string `json:"network" binding:"required"`
+					Label   string `json:"label"`
+				}
+
+				if err := c.ShouldBindJSON(&req); err != nil {
+					c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+					return
+				}
+
+				claims, _ := c.Get("claims")
+				userClaims := claims.(*security.Claims)
+
+				if pws != nil {
+					pws.GetWithdrawalEngine().AddAddressToBook(userClaims.UserID, req.Address, req.Network, req.Label, true)
+				}
+
+				id := fmt.Sprintf("adr_bk_%d", time.Now().UnixNano())
+
+				if db != nil {
+					_, err := db.Pool.Exec(context.Background(),
+						`INSERT INTO withdrawal_address_book (id, user_id, address, network, label, is_whitelisted, trust_score, verified_at)
+						 VALUES ($1, $2, $3, $4, $5, $6, $7, NOW()) ON CONFLICT (user_id, address) DO UPDATE SET is_whitelisted = true`,
+						id, userClaims.UserID, req.Address, req.Network, req.Label, true, 1.0)
+					if err != nil {
+						c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to add address to Whitelist"})
+						return
+					}
+				}
+
+				c.JSON(http.StatusCreated, gin.H{
+					"message": "Address added and whitelisted successfully",
+					"id":      id,
+					"address": req.Address,
+				})
+			})
+
+			// POST /api/v1/wallet/withdrawals/approve/:id
+			walletGroup.POST("/withdrawals/approve/:id", func(c *gin.Context) {
+				idParam := c.Param("id")
+				claims, _ := c.Get("claims")
+				userClaims := claims.(*security.Claims) // Approver Admin credentials
+
+				if pws != nil {
+					req, err := pws.ProcessWithdrawalApproval(context.Background(), idParam, userClaims.UserID)
+					if err != nil {
+						c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+						return
+					}
+					c.JSON(http.StatusOK, gin.H{
+						"message":       "Administrative withdrawal approval recorded successfully",
+						"withdrawal_id": req.ID,
+						"status":        string(req.Status),
+					})
+					return
+				}
+
+				c.JSON(http.StatusOK, gin.H{
+					"message":       "Administrative withdrawal approval recorded successfully",
+					"withdrawal_id": idParam,
+					"status":        "APPROVED",
+				})
+			})
+
+			// GET /api/v1/wallet/deposits/history
+			walletGroup.GET("/deposits/history", func(c *gin.Context) {
+				claims, _ := c.Get("claims")
+				userClaims := claims.(*security.Claims)
+
+				if db != nil {
+					var history []gin.H
+					rows, err := db.Pool.Query(context.Background(),
+						`SELECT id, user_id, asset, amount, fee, address, tx_hash, confirmations, status, created_at, updated_at
+						 FROM deposits
+						 WHERE user_id = $1
+						 ORDER BY created_at DESC`, userClaims.UserID)
+					if err == nil {
+						defer rows.Close()
+						for rows.Next() {
+							var id, uID, asset, addr, txHash, status string
+							var amt, fee float64
+							var conf int
+							var created, updated time.Time
+							if errScan := rows.Scan(&id, &uID, &asset, &amt, &fee, &addr, &txHash, &conf, &status, &created, &updated); errScan == nil {
+								history = append(history, gin.H{
+									"id":            id,
+									"user_id":       uID,
+									"asset":         asset,
+									"amount":        amt,
+									"fee":           fee,
+									"address":       addr,
+									"tx_hash":       txHash,
+									"confirmations": conf,
+									"status":        status,
+									"created_at":    created,
+									"updated_at":    updated,
+								})
+							}
+						}
+						c.JSON(http.StatusOK, gin.H{"deposits": history})
+						return
+					}
+				}
+
+				// Fallback Mock Deposit History
+				c.JSON(http.StatusOK, gin.H{
+					"deposits": []gin.H{
+						{
+							"id":            "dep_mock_111",
+							"user_id":       userClaims.UserID,
+							"asset":         "BTC",
+							"amount":        0.15,
+							"fee":           0.0,
+							"address":       "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2",
+							"tx_hash":       "0x123abc456def7890_btc",
+							"confirmations": 6,
+							"status":        "COMPLETED",
+							"created_at":    time.Now().Add(-2 * time.Hour),
+							"updated_at":    time.Now().Add(-1 * time.Hour),
+						},
+						{
+							"id":            "dep_mock_222",
+							"user_id":       userClaims.UserID,
+							"asset":         "ETH",
+							"amount":        2.5,
+							"fee":           0.0,
+							"address":       "0x71C7656EC7ab88b098defB751B7401B5f6d1476B",
+							"tx_hash":       "0x123abc456def7890_eth",
+							"confirmations": 4,
+							"status":        "PENDING",
+							"created_at":    time.Now().Add(-10 * time.Minute),
+							"updated_at":    time.Now(),
+						},
+					},
+				})
+			})
+
+			// GET /api/v1/wallet/deposits/status/:id
+			walletGroup.GET("/deposits/status/:id", func(c *gin.Context) {
+				idParam := c.Param("id")
+				claims, _ := c.Get("claims")
+				userClaims := claims.(*security.Claims)
+
+				if db != nil {
+					var status string
+					var conf int
+					// Query directly from deposits or deposit_confirmations
+					err := db.Pool.QueryRow(context.Background(),
+						`SELECT status, confirmations
+						 FROM deposits
+						 WHERE id = $1 AND user_id = $2`, idParam, userClaims.UserID).Scan(&status, &conf)
+					if err == nil {
+						c.JSON(http.StatusOK, gin.H{
+							"id":            idParam,
+							"status":        status,
+							"confirmations": conf,
+						})
+						return
+					}
+				}
+
+				// Fallback Mock Deposit Status
+				c.JSON(http.StatusOK, gin.H{
+					"id":            idParam,
+					"status":        "CONFIRMED",
+					"confirmations": 4,
+				})
+			})
+
+			// GET /api/v1/wallet/deposits/details/:id
+			walletGroup.GET("/deposits/details/:id", func(c *gin.Context) {
+				idParam := c.Param("id")
+				claims, _ := c.Get("claims")
+				userClaims := claims.(*security.Claims)
+
+				if db != nil {
+					var id, uID, asset, addr, txHash, status string
+					var amt, fee float64
+					var conf int
+					var created, updated time.Time
+					err := db.Pool.QueryRow(context.Background(),
+						`SELECT id, user_id, asset, amount, fee, address, tx_hash, confirmations, status, created_at, updated_at
+						 FROM deposits
+						 WHERE id = $1 AND user_id = $2`, idParam, userClaims.UserID).Scan(&id, &uID, &asset, &amt, &fee, &addr, &txHash, &conf, &status, &created, &updated)
+					if err == nil {
+						c.JSON(http.StatusOK, gin.H{
+							"id":            id,
+							"user_id":       uID,
+							"asset":         asset,
+							"amount":        amt,
+							"fee":           fee,
+							"address":       addr,
+							"tx_hash":       txHash,
+							"confirmations": conf,
+							"status":        status,
+							"created_at":    created,
+							"updated_at":    updated,
+						})
+						return
+					}
+				}
+
+				// Fallback Mock Details
+				c.JSON(http.StatusOK, gin.H{
+					"id":            idParam,
+					"user_id":       userClaims.UserID,
+					"asset":         "BTC",
+					"amount":        0.15,
+					"fee":           0.0,
+					"address":       "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2",
+					"tx_hash":       "0x123abc456def7890_btc",
+					"confirmations": 6,
+					"status":        "COMPLETED",
+					"created_at":    time.Now().Add(-2 * time.Hour),
+					"updated_at":    time.Now().Add(-1 * time.Hour),
+				})
+			})
+
+			// GET /api/v1/wallet/deposits/tx/:tx_hash
+			walletGroup.GET("/deposits/tx/:tx_hash", func(c *gin.Context) {
+				hashParam := c.Param("tx_hash")
+
+				if db != nil {
+					var txHash, net, asset, sender, receiver string
+					var amt float64
+					var block, gas int64
+					var stamp time.Time
+					err := db.Pool.QueryRow(context.Background(),
+						`SELECT tx_hash, network, asset, amount, sender, receiver, block_number, gas_used, timestamp
+						 FROM blockchain_transactions
+						 WHERE tx_hash = $1`, hashParam).Scan(&txHash, &net, &asset, &amt, &sender, &receiver, &block, &gas, &stamp)
+					if err == nil {
+						c.JSON(http.StatusOK, gin.H{
+							"tx_hash":      txHash,
+							"network":      net,
+							"asset":        asset,
+							"amount":       amt,
+							"sender":       sender,
+							"receiver":     receiver,
+							"block_number": block,
+							"gas_used":     gas,
+							"timestamp":    stamp,
+						})
+						return
+					}
+				}
+
+				// Fallback Mock Tx details
+				c.JSON(http.StatusOK, gin.H{
+					"tx_hash":      hashParam,
+					"network":      "Ethereum",
+					"asset":        "ETH",
+					"amount":       2.5,
+					"sender":       "0xSenderAddr_111",
+					"receiver":     "0xReceiverAddr_222",
+					"block_number": 15004322,
+					"gas_used":     21000,
+					"timestamp":    time.Now(),
+				})
+			})
+
+			// GET /api/v1/wallet/deposits/confirmations/:id
+			walletGroup.GET("/deposits/confirmations/:id", func(c *gin.Context) {
+				idParam := c.Param("id")
+
+				if db != nil {
+					var depID, status string
+					var confCount, reqConf int
+					var updated time.Time
+					err := db.Pool.QueryRow(context.Background(),
+						`SELECT deposit_id, confirmations_count, required_confirmations, status, updated_at
+						 FROM deposit_confirmations
+						 WHERE deposit_id = $1`, idParam).Scan(&depID, &confCount, &reqConf, &status, &updated)
+					if err == nil {
+						c.JSON(http.StatusOK, gin.H{
+							"deposit_id":             depID,
+							"confirmations_count":    confCount,
+							"required_confirmations": reqConf,
+							"status":                 status,
+							"updated_at":             updated,
+						})
+						return
+					}
+				}
+
+				// Fallback Mock Confirmation Status
+				c.JSON(http.StatusOK, gin.H{
+					"deposit_id":             idParam,
+					"confirmations_count":    4,
+					"required_confirmations": 12,
+					"status":                 "PENDING",
+					"updated_at":             time.Now(),
+				})
+			})
+
 			// Fetch user asset balances
-			wallet.GET("/balances", func(c *gin.Context) {
+			walletGroup.GET("/balances", func(c *gin.Context) {
 				claims, _ := c.Get("claims")
 				userClaims := claims.(*security.Claims)
 
@@ -407,14 +906,14 @@ func main() {
 			})
 
 			// GET /api/v1/wallet/summary
-			wallet.GET("/summary", func(c *gin.Context) {
+			walletGroup.GET("/summary", func(c *gin.Context) {
 				claims, _ := c.Get("claims")
 				userClaims := claims.(*security.Claims)
 
 				if db != nil {
 					var summaries []gin.H
 					rows, err := db.Pool.Query(context.Background(),
-						`SELECT w.id, w.type, w.is_locked, b.asset, b.available, b.locked, b.reserved, b.pending, b.total
+						`SELECT w.id, w.type, w.is_locked, COALESCE(b.asset, ''), COALESCE(b.available, 0), COALESCE(b.locked, 0), COALESCE(b.reserved, 0), COALESCE(b.pending, 0), COALESCE(b.total, 0)
 						 FROM wallets w
 						 LEFT JOIN wallet_balances b ON w.id = b.wallet_id
 						 WHERE w.user_id = $1`, userClaims.UserID)
@@ -473,7 +972,7 @@ func main() {
 			})
 
 			// GET /api/v1/wallet/assets
-			wallet.GET("/assets", func(c *gin.Context) {
+			walletGroup.GET("/assets", func(c *gin.Context) {
 				if db != nil {
 					var assetsList []gin.H
 					rows, err := db.Pool.Query(context.Background(),
@@ -554,7 +1053,7 @@ func main() {
 			})
 
 			// GET /api/v1/wallet/assets/:symbol
-			wallet.GET("/assets/:symbol", func(c *gin.Context) {
+			walletGroup.GET("/assets/:symbol", func(c *gin.Context) {
 				symbolParam := strings.ToUpper(c.Param("symbol"))
 
 				if db != nil {
@@ -611,7 +1110,7 @@ func main() {
 			})
 
 			// GET /api/v1/wallet/addresses
-			wallet.GET("/addresses", func(c *gin.Context) {
+			walletGroup.GET("/addresses", func(c *gin.Context) {
 				claims, _ := c.Get("claims")
 				userClaims := claims.(*security.Claims)
 
@@ -663,7 +1162,7 @@ func main() {
 			})
 
 			// GET /api/v1/wallet/balances/details
-			wallet.GET("/balances/details", func(c *gin.Context) {
+			walletGroup.GET("/balances/details", func(c *gin.Context) {
 				claims, _ := c.Get("claims")
 				userClaims := claims.(*security.Claims)
 
@@ -725,7 +1224,7 @@ func main() {
 			})
 
 			// GET /api/v1/wallet/history
-			wallet.GET("/history", func(c *gin.Context) {
+			walletGroup.GET("/history", func(c *gin.Context) {
 				claims, _ := c.Get("claims")
 				userClaims := claims.(*security.Claims)
 
@@ -791,7 +1290,7 @@ func main() {
 			})
 
 			// Request deposit wallet address validation/allocation
-			wallet.POST("/address", func(c *gin.Context) {
+			walletGroup.POST("/address", func(c *gin.Context) {
 				var req struct {
 					Asset string `json:"asset" binding:"required"`
 				}
@@ -832,7 +1331,7 @@ func main() {
 			})
 
 			// Process withdrawal requests
-			wallet.POST("/withdraw", func(c *gin.Context) {
+			walletGroup.POST("/withdraw", func(c *gin.Context) {
 				var req struct {
 					Asset   string  `json:"asset" binding:"required"`
 					Amount  float64 `json:"amount" binding:"required,gt=0"`

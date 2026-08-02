@@ -15,5 +15,6 @@ use (
 	./packages/security
 	./packages/types
 	./packages/wallet
+	./packages/withdrawals
 	./tests
 )

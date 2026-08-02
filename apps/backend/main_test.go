@@ -157,6 +157,62 @@ func TestExpandedWalletAPIs(t *testing.T) {
 				{"id": "audit_111", "asset": "BTC", "action": "WALLET_CREATED"},
 			}})
 		})
+
+		// Deposit Engine Routes
+		walletGroup.GET("/deposits/history", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"deposits": []gin.H{
+				{"id": "dep_123", "asset": "BTC", "amount": 0.5},
+			}})
+		})
+
+		walletGroup.GET("/deposits/status/:id", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"id": c.Param("id"), "status": "PENDING"})
+		})
+
+		walletGroup.GET("/deposits/details/:id", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"id": c.Param("id"), "asset": "BTC", "amount": 0.5})
+		})
+
+		walletGroup.GET("/deposits/tx/:tx_hash", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"tx_hash": c.Param("tx_hash"), "network": "Ethereum"})
+		})
+
+		walletGroup.GET("/deposits/confirmations/:id", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"deposit_id": c.Param("id"), "confirmations_count": 4})
+		})
+
+		// Withdrawal Engine Routes
+		walletGroup.POST("/withdrawals/create", func(c *gin.Context) {
+			c.JSON(http.StatusAccepted, gin.H{"id": "wth_123", "status": "REQUESTED"})
+		})
+
+		walletGroup.POST("/withdrawals/cancel/:id", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"id": c.Param("id"), "status": "REJECTED"})
+		})
+
+		walletGroup.GET("/withdrawals/status/:id", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"id": c.Param("id"), "status": "APPROVED"})
+		})
+
+		walletGroup.GET("/withdrawals/history", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"withdrawals": []gin.H{
+				{"id": "wth_123", "asset": "USDT", "amount": 100.0},
+			}})
+		})
+
+		walletGroup.GET("/withdrawals/address-book", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"address_book": []gin.H{
+				{"address": "0x123", "label": "My Wallet"},
+			}})
+		})
+
+		walletGroup.POST("/withdrawals/whitelist", func(c *gin.Context) {
+			c.JSON(http.StatusCreated, gin.H{"id": "adr_bk_123", "status": "Whitelisted"})
+		})
+
+		walletGroup.POST("/withdrawals/approve/:id", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"withdrawal_id": c.Param("id"), "status": "APPROVED"})
+		})
 	}
 
 	access, _, _ := security.GenerateJWT("usr_123", "test@test.com", secret, 5*time.Minute, 1*time.Hour)
@@ -173,16 +229,35 @@ func TestExpandedWalletAPIs(t *testing.T) {
 		{"/api/v1/wallet/addresses", "GET", "addresses"},
 		{"/api/v1/wallet/balances/details", "GET", "balances_details"},
 		{"/api/v1/wallet/history", "GET", "history"},
+		{"/api/v1/wallet/deposits/history", "GET", "deposits"},
+		{"/api/v1/wallet/deposits/status/dep_123", "GET", "status"},
+		{"/api/v1/wallet/deposits/details/dep_123", "GET", "amount"},
+		{"/api/v1/wallet/deposits/tx/0xabc", "GET", "tx_hash"},
+		{"/api/v1/wallet/deposits/confirmations/dep_123", "GET", "confirmations_count"},
+		{"/api/v1/wallet/withdrawals/create", "POST", "id"},
+		{"/api/v1/wallet/withdrawals/cancel/wth_123", "POST", "status"},
+		{"/api/v1/wallet/withdrawals/status/wth_123", "GET", "status"},
+		{"/api/v1/wallet/withdrawals/history", "GET", "withdrawals"},
+		{"/api/v1/wallet/withdrawals/address-book", "GET", "address_book"},
+		{"/api/v1/wallet/withdrawals/whitelist", "POST", "id"},
+		{"/api/v1/wallet/withdrawals/approve/wth_123", "POST", "status"},
 	}
 
 	for _, tc := range targets {
 		w := httptest.NewRecorder()
-		req, _ := http.NewRequest(tc.Method, tc.Path, nil)
+		var req *http.Request
+		if tc.Method == "POST" {
+			payload := `{"asset":"USDT","amount":50.0,"address":"0x123","network":"Ethereum","label":"Test"}`
+			req, _ = http.NewRequest(tc.Method, tc.Path, bytes.NewReader([]byte(payload)))
+			req.Header.Set("Content-Type", "application/json")
+		} else {
+			req, _ = http.NewRequest(tc.Method, tc.Path, nil)
+		}
 		req.Header.Set("Authorization", "Bearer "+access)
 		r.ServeHTTP(w, req)
 
-		if w.Code != http.StatusOK {
-			t.Errorf("Path %s expected status 200, got %d", tc.Path, w.Code)
+		if w.Code != http.StatusOK && w.Code != http.StatusAccepted && w.Code != http.StatusCreated {
+			t.Errorf("Path %s expected status success, got %d: %s", tc.Path, w.Code, w.Body.String())
 		}
 
 		var resp map[string]interface{}

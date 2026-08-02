@@ -645,6 +645,154 @@ var schemaMigrations = []Migration{
 			CREATE INDEX IF NOT EXISTS idx_wallet_audits_wallet ON wallet_audits (wallet_id);
 		`,
 	},
+	{
+		ID:   40,
+		Name: "create_blockchain_transactions_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS blockchain_transactions (
+				tx_hash VARCHAR(255) PRIMARY KEY,
+				network VARCHAR(100) NOT NULL,
+				asset VARCHAR(50) NOT NULL,
+				amount DECIMAL(36, 18) NOT NULL,
+				sender VARCHAR(255) NOT NULL,
+				receiver VARCHAR(255) NOT NULL,
+				block_number BIGINT NOT NULL,
+				gas_used BIGINT DEFAULT 0 NOT NULL,
+				timestamp TIMESTAMP NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_blockchain_tx_network_block ON blockchain_transactions (network, block_number);
+		`,
+	},
+	{
+		ID:   41,
+		Name: "create_deposit_confirmations_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS deposit_confirmations (
+				deposit_id VARCHAR(255) PRIMARY KEY,
+				confirmations_count INT NOT NULL,
+				required_confirmations INT NOT NULL,
+				status VARCHAR(50) NOT NULL,
+				updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_deposit_conf_status ON deposit_confirmations (status);
+		`,
+	},
+	{
+		ID:   42,
+		Name: "create_deposit_events_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS deposit_events (
+				id VARCHAR(255) PRIMARY KEY,
+				event_type VARCHAR(100) NOT NULL,
+				deposit_id VARCHAR(255) NOT NULL,
+				payload TEXT NOT NULL,
+				timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_deposit_events_type_dep ON deposit_events (event_type, deposit_id);
+		`,
+	},
+	{
+		ID:   43,
+		Name: "create_withdrawal_address_book_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS withdrawal_address_book (
+				id VARCHAR(255) PRIMARY KEY,
+				user_id VARCHAR(255) NOT NULL,
+				address VARCHAR(255) NOT NULL,
+				network VARCHAR(100) NOT NULL,
+				label VARCHAR(255) DEFAULT '' NOT NULL,
+				is_whitelisted BOOLEAN DEFAULT TRUE NOT NULL,
+				trust_score DECIMAL(5, 4) DEFAULT 1.0 NOT NULL,
+				verified_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				UNIQUE (user_id, address)
+			);
+			CREATE INDEX IF NOT EXISTS idx_withdraw_addr_user_addr ON withdrawal_address_book (user_id, address);
+		`,
+	},
+	{
+		ID:   44,
+		Name: "create_withdrawal_queue_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS withdrawal_queue (
+				id VARCHAR(255) PRIMARY KEY,
+				user_id VARCHAR(255) NOT NULL,
+				asset VARCHAR(50) NOT NULL,
+				amount DECIMAL(36, 18) NOT NULL,
+				fee DECIMAL(36, 18) NOT NULL,
+				address VARCHAR(255) NOT NULL,
+				status VARCHAR(50) NOT NULL,
+				risk_score DECIMAL(5, 4) DEFAULT 0.0 NOT NULL,
+				retries INT DEFAULT 0 NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_withdrawal_q_status ON withdrawal_queue (status);
+			CREATE INDEX IF NOT EXISTS idx_withdrawal_q_user ON withdrawal_queue (user_id);
+		`,
+	},
+	{
+		ID:   45,
+		Name: "create_withdrawal_approvals_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS withdrawal_approvals (
+				id VARCHAR(255) PRIMARY KEY,
+				withdrawal_id VARCHAR(255) NOT NULL,
+				admin_id VARCHAR(255) NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				FOREIGN KEY (withdrawal_id) REFERENCES withdrawal_queue (id) ON DELETE CASCADE
+			);
+			CREATE INDEX IF NOT EXISTS idx_withdrawal_app_id ON withdrawal_approvals (withdrawal_id);
+		`,
+	},
+	{
+		ID:   46,
+		Name: "create_withdrawal_audits_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS withdrawal_audits (
+				id VARCHAR(255) PRIMARY KEY,
+				user_id VARCHAR(255) NOT NULL,
+				withdrawal_id VARCHAR(255) NOT NULL,
+				asset VARCHAR(50) NOT NULL,
+				amount DECIMAL(36, 18) NOT NULL,
+				prev_status VARCHAR(50) NOT NULL,
+				new_status VARCHAR(50) NOT NULL,
+				message TEXT NOT NULL,
+				timestamp TIMESTAMP NOT NULL,
+				FOREIGN KEY (withdrawal_id) REFERENCES withdrawal_queue (id) ON DELETE CASCADE
+			);
+			CREATE INDEX IF NOT EXISTS idx_withdrawal_aud_user ON withdrawal_audits (user_id);
+			CREATE INDEX IF NOT EXISTS idx_withdrawal_aud_id ON withdrawal_audits (withdrawal_id);
+		`,
+	},
+	{
+		ID:   47,
+		Name: "create_withdrawal_risk_events_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS withdrawal_risk_events (
+				id VARCHAR(255) PRIMARY KEY,
+				user_id VARCHAR(255) NOT NULL,
+				withdrawal_id VARCHAR(255) NOT NULL,
+				details TEXT NOT NULL,
+				timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				FOREIGN KEY (withdrawal_id) REFERENCES withdrawal_queue (id) ON DELETE CASCADE
+			);
+			CREATE INDEX IF NOT EXISTS idx_withdrawal_risk_id ON withdrawal_risk_events (withdrawal_id);
+		`,
+	},
+	{
+		ID:   48,
+		Name: "create_withdrawal_broadcast_history_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS withdrawal_broadcast_history (
+				tx_hash VARCHAR(255) PRIMARY KEY,
+				withdrawal_id VARCHAR(255) NOT NULL,
+				payload_hex TEXT NOT NULL,
+				timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				FOREIGN KEY (withdrawal_id) REFERENCES withdrawal_queue (id) ON DELETE CASCADE
+			);
+			CREATE INDEX IF NOT EXISTS idx_withdrawal_broad_id ON withdrawal_broadcast_history (withdrawal_id);
+		`,
+	},
 }
 
 // RunMigrations executes schema migration steps on the pgx connection pool
