@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"os"
 	"strconv"
 	"testing"
 	"time"
@@ -541,4 +542,60 @@ func TestFeeEnginePromotionalOverrides(t *testing.T) {
 	if maker != 0.0005 || taker != 0.0005 {
 		t.Errorf("Expected overriden fee rate 0.05%%, got %f and %f", maker, taker)
 	}
+}
+
+func TestObservabilityHealthprobers(t *testing.T) {
+	oe := NewObservabilityEngine()
+	health := oe.RunHealthCheck()
+
+	if health.Status != HealthGreen {
+		t.Errorf("Expected GREEN health status on startup, got %s", health.Status)
+	}
+
+	if health.MemoryAlloc == 0 || health.NumGoroutine == 0 {
+		t.Error("Health stats should hold physical resource consumption metrics")
+	}
+}
+
+func TestObservabilityBackups(t *testing.T) {
+	oe := NewObservabilityEngine()
+	job, err := oe.CreateBackup("DATABASE")
+	if err != nil {
+		t.Fatalf("Failed to trigger DB backup: %v", err)
+	}
+
+	if job.Status != "COMPLETED" || job.Type != "DATABASE" {
+		t.Error("Backup job parameters mismatch")
+	}
+
+	// Verify backup file exists
+	if _, err := os.Stat(job.Filepath); os.IsNotExist(err) {
+		t.Errorf("Backup file was not created on disk: %s", job.Filepath)
+	}
+
+	// Clean up backup file
+	_ = os.Remove(job.Filepath)
+}
+
+func TestObservabilityDisasterRecovery(t *testing.T) {
+	oe := NewObservabilityEngine()
+	matcher := NewMatcher("BTC-USDT")
+	re := NewRecoveryEngine("/tmp/velyxora_disaster_recovery_test_journal.json")
+
+	// Pre-seed journal with a submit and cancel action
+	ord := &types.Order{ID: "o_rec_1", Symbol: "BTC-USDT", Price: 50000.0, Quantity: 1.0, Type: types.TypeLimit, Side: types.SideBuy}
+	re.WriteSubmit(ord)
+	re.WriteCancel("o_rec_1")
+
+	success, err := oe.VerifyDisasterRecovery(matcher, re)
+	if err != nil || !success {
+		t.Fatalf("Disaster recovery validation failed: %v", err)
+	}
+
+	if len(oe.GetRecoveryLogs()) == 0 {
+		t.Error("Disaster recovery should record recovery trace logs")
+	}
+
+	// Clean up journal file
+	_ = os.Remove("/tmp/velyxora_disaster_recovery_test_journal.json")
 }

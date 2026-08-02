@@ -421,6 +421,56 @@ var schemaMigrations = []Migration{
 			);
 		`,
 	},
+	{
+		ID:   26,
+		Name: "create_monitoring_metrics_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS monitoring_metrics (
+				id VARCHAR(255) PRIMARY KEY,
+				cpu_usage DECIMAL(5, 2) NOT NULL,
+				memory_usage BIGINT NOT NULL,
+				goroutines INT NOT NULL,
+				timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+		`,
+	},
+	{
+		ID:   27,
+		Name: "create_health_checks_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS health_checks (
+				id VARCHAR(255) PRIMARY KEY,
+				service_name VARCHAR(100) NOT NULL,
+				status VARCHAR(50) NOT NULL,
+				timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+		`,
+	},
+	{
+		ID:   28,
+		Name: "create_backup_history_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS backup_history (
+				id VARCHAR(255) PRIMARY KEY,
+				backup_type VARCHAR(50) NOT NULL,
+				status VARCHAR(50) NOT NULL,
+				filepath VARCHAR(255) NOT NULL,
+				timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+		`,
+	},
+	{
+		ID:   29,
+		Name: "create_recovery_history_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS recovery_history (
+				id VARCHAR(255) PRIMARY KEY,
+				replayed_count INT NOT NULL,
+				status VARCHAR(50) NOT NULL,
+				timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+		`,
+	},
 }
 
 // RunMigrations executes schema migration steps on the pgx connection pool

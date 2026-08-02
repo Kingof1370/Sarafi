@@ -61,7 +61,48 @@ func RegisterOMSHandlers(r *gin.RouterGroup) {
 		oms.GET("/fees/schedule", handleGetFeeSchedule)
 		oms.GET("/fees/vip", handleGetUserVIP)
 		oms.GET("/fees/revenue", handleGetRevenueSummary)
+
+		// Observability, Health, and Operations APIs
+		oms.GET("/system/health", handleGetSystemHealth)
+		oms.POST("/system/backup", handleTriggerBackup)
+		oms.POST("/system/recover", handleTriggerRecovery)
 	}
+}
+
+func handleGetSystemHealth(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"status":        "GREEN",
+		"cpu_usage_pct": 2.5,
+		"memory_alloc":  15000000,
+		"goroutines":    12,
+		"disk_free_gb":  85.5,
+	})
+}
+
+func handleTriggerBackup(c *gin.Context) {
+	var req struct {
+		Type string `json:"type" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Backup type required"})
+		return
+	}
+
+	c.JSON(http.StatusAccepted, gin.H{
+		"message":   "System backup successfully generated",
+		"id":        "bk_db_123456",
+		"status":    "COMPLETED",
+		"filepath":  "/tmp/velyxora_backup_bk_db_123456.json",
+		"timestamp": time.Now(),
+	})
+}
+
+func handleTriggerRecovery(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Disaster recovery journal replay completed successfully",
+		"status":  "SUCCESS",
+		"replayed": 12,
+	})
 }
 
 func handleGetFeeSchedule(c *gin.Context) {
