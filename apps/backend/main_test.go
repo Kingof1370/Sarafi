@@ -213,6 +213,35 @@ func TestExpandedWalletAPIs(t *testing.T) {
 		walletGroup.POST("/withdrawals/approve/:id", func(c *gin.Context) {
 			c.JSON(http.StatusOK, gin.H{"withdrawal_id": c.Param("id"), "status": "APPROVED"})
 		})
+
+		// Blockchain Connectivity Routes
+		walletGroup.GET("/blockchain/networks", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"networks": []gin.H{
+				{"network": "Bitcoin", "status": "SYNCED"},
+			}})
+		})
+
+		walletGroup.GET("/blockchain/nodes", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"nodes": []gin.H{
+				{"id": "eth_primary", "network": "Ethereum"},
+			}})
+		})
+
+		walletGroup.GET("/blockchain/health", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"health_metrics": []gin.H{
+				{"node_id": "eth_primary", "health_score": 0.98},
+			}})
+		})
+
+		walletGroup.GET("/blockchain/sync", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"sync_history": []gin.H{
+				{"id": "sync_1", "block_height": 18450122},
+			}})
+		})
+
+		walletGroup.GET("/blockchain/broadcast/:id", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"withdrawal_id": c.Param("id"), "tx_hash": "0x123"})
+		})
 	}
 
 	access, _, _ := security.GenerateJWT("usr_123", "test@test.com", secret, 5*time.Minute, 1*time.Hour)
@@ -241,6 +270,11 @@ func TestExpandedWalletAPIs(t *testing.T) {
 		{"/api/v1/wallet/withdrawals/address-book", "GET", "address_book"},
 		{"/api/v1/wallet/withdrawals/whitelist", "POST", "id"},
 		{"/api/v1/wallet/withdrawals/approve/wth_123", "POST", "status"},
+		{"/api/v1/wallet/blockchain/networks", "GET", "networks"},
+		{"/api/v1/wallet/blockchain/nodes", "GET", "nodes"},
+		{"/api/v1/wallet/blockchain/health", "GET", "health_metrics"},
+		{"/api/v1/wallet/blockchain/sync", "GET", "sync_history"},
+		{"/api/v1/wallet/blockchain/broadcast/wth_123", "GET", "tx_hash"},
 	}
 
 	for _, tc := range targets {

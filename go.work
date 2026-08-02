@@ -8,6 +8,7 @@ use (
 	./packages/assets
 	./packages/blockchain
 	./packages/common
+	./packages/connectivity
 	./packages/database
 	./packages/deposits
 	./packages/ledger-common

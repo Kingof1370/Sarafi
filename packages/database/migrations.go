@@ -793,6 +793,80 @@ var schemaMigrations = []Migration{
 			CREATE INDEX IF NOT EXISTS idx_withdrawal_broad_id ON withdrawal_broadcast_history (withdrawal_id);
 		`,
 	},
+	{
+		ID:   49,
+		Name: "create_blockchain_nodes_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS blockchain_nodes (
+				id VARCHAR(255) PRIMARY KEY,
+				network VARCHAR(100) NOT NULL,
+				url VARCHAR(255) NOT NULL,
+				type VARCHAR(50) NOT NULL,
+				is_active BOOLEAN DEFAULT TRUE NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_blockchain_nodes_net ON blockchain_nodes (network);
+		`,
+	},
+	{
+		ID:   50,
+		Name: "create_rpc_endpoints_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS rpc_endpoints (
+				id VARCHAR(255) PRIMARY KEY,
+				node_id VARCHAR(255) NOT NULL,
+				method_name VARCHAR(100) NOT NULL,
+				is_supported BOOLEAN DEFAULT TRUE NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				FOREIGN KEY (node_id) REFERENCES blockchain_nodes (id) ON DELETE CASCADE
+			);
+			CREATE INDEX IF NOT EXISTS idx_rpc_endpoints_node ON rpc_endpoints (node_id);
+		`,
+	},
+	{
+		ID:   51,
+		Name: "create_network_status_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS network_status (
+				network VARCHAR(100) PRIMARY KEY,
+				latest_block BIGINT DEFAULT 0 NOT NULL,
+				status VARCHAR(50) NOT NULL,
+				latency_ms BIGINT DEFAULT 0 NOT NULL,
+				updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+		`,
+	},
+	{
+		ID:   52,
+		Name: "create_blockchain_sync_history_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS blockchain_sync_history (
+				id VARCHAR(255) PRIMARY KEY,
+				network VARCHAR(100) NOT NULL,
+				block_height BIGINT NOT NULL,
+				block_hash VARCHAR(255) NOT NULL,
+				status VARCHAR(50) NOT NULL,
+				timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_blockchain_sync_net ON blockchain_sync_history (network);
+		`,
+	},
+	{
+		ID:   53,
+		Name: "create_node_metrics_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS node_metrics (
+				id VARCHAR(255) PRIMARY KEY,
+				node_id VARCHAR(255) NOT NULL,
+				latency_ms BIGINT NOT NULL,
+				failed_requests INT NOT NULL,
+				health_score DECIMAL(5, 4) NOT NULL,
+				timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				FOREIGN KEY (node_id) REFERENCES blockchain_nodes (id) ON DELETE CASCADE
+			);
+			CREATE INDEX IF NOT EXISTS idx_node_metrics_node ON node_metrics (node_id);
+		`,
+	},
 }
 
 // RunMigrations executes schema migration steps on the pgx connection pool

@@ -14,6 +14,7 @@ import (
 	"velyxora/packages/address"
 	"velyxora/packages/assets"
 	"velyxora/packages/blockchain"
+	"velyxora/packages/connectivity"
 	"velyxora/packages/deposits"
 	"velyxora/packages/withdrawals"
 )
@@ -29,6 +30,7 @@ type PersistentWalletService struct {
 	blockchainReg    *blockchain.AdapterRegistry
 	depositEngine    *deposits.DepositEngine
 	withdrawalEngine *withdrawals.WithdrawalEngine
+	nodeManager      *connectivity.NodeManager
 	log              *logger.Logger
 }
 
@@ -42,6 +44,7 @@ func NewPersistentWalletService(db *database.DB, producer *common.KafkaProducer,
 		blockchainReg:    blockchain.NewAdapterRegistry(),
 		depositEngine:    deposits.NewDepositEngine(),
 		withdrawalEngine: withdrawals.NewWithdrawalEngine(),
+		nodeManager:      connectivity.NewNodeManager(),
 		log:              log,
 	}
 }
@@ -86,7 +89,23 @@ func (p *PersistentWalletService) Bootstrap(ctx context.Context) error {
 		}
 	}
 
-	// 2. Load existing wallets from Database if available
+	// 2. Register Standard Connection Nodes
+	defaultNodes := []*connectivity.NodeRecord{
+		{ID: "eth_primary", Network: "Ethereum", URL: "https://eth.velyxora.com", Type: connectivity.TypePrimary, IsAvailable: true, IsSynced: true, HealthScore: 1.0},
+		{ID: "eth_fallback", Network: "Ethereum", URL: "https://eth-fallback.velyxora.com", Type: connectivity.TypeFallback, IsAvailable: true, IsSynced: true, HealthScore: 0.9},
+		{ID: "btc_primary", Network: "Bitcoin", URL: "https://btc.velyxora.com", Type: connectivity.TypePrimary, IsAvailable: true, IsSynced: true, HealthScore: 1.0},
+	}
+
+	for _, n := range defaultNodes {
+		p.nodeManager.RegisterNode(n)
+		if p.db != nil {
+			_, _ = p.db.Pool.Exec(ctx,
+				"INSERT INTO blockchain_nodes (id, network, url, type, is_active) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (id) DO NOTHING",
+				n.ID, n.Network, n.URL, string(n.Type), true)
+		}
+	}
+
+	// 3. Load existing wallets from Database if available
 	if p.db != nil {
 		rows, err := p.db.Pool.Query(ctx, "SELECT id, user_id, type, is_locked FROM wallets")
 		if err == nil {
@@ -134,6 +153,11 @@ func (p *PersistentWalletService) GetDepositEngine() *deposits.DepositEngine {
 // GetWithdrawalEngine retrieves the internal WithdrawalEngine
 func (p *PersistentWalletService) GetWithdrawalEngine() *withdrawals.WithdrawalEngine {
 	return p.withdrawalEngine
+}
+
+// GetNodeManager retrieves the internal NodeManager
+func (p *PersistentWalletService) GetNodeManager() *connectivity.NodeManager {
+	return p.nodeManager
 }
 
 // ProvisionWallet handles both DB persistence, state allocation, and Kafka notifications
