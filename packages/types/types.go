@@ -299,3 +299,78 @@ type KafkaEvent struct {
 	Payload   interface{} `json:"payload"`
 	Timestamp time.Time   `json:"timestamp"`
 }
+
+// WalletCreatedEvent represents versioned schema v1 for wallet creation
+type WalletCreatedEvent struct {
+	Version   string    `json:"version"` // "v1"
+	WalletID  string    `json:"wallet_id"`
+	UserID    string    `json:"user_id"`
+	Type      string    `json:"type"`
+	Timestamp time.Time `json:"timestamp"`
+}
+
+// WalletUpdatedEvent represents versioned schema v1 for wallet status adjustments
+type WalletUpdatedEvent struct {
+	Version   string    `json:"version"` // "v1"
+	WalletID  string    `json:"wallet_id"`
+	IsLocked  bool      `json:"is_locked"`
+	Timestamp time.Time `json:"timestamp"`
+}
+
+// BalanceUpdatedEvent represents versioned schema v1 for balance changes
+type BalanceUpdatedEvent struct {
+	Version   string    `json:"version"` // "v1"
+	WalletID  string    `json:"wallet_id"`
+	Asset     string    `json:"asset"`
+	Available float64   `json:"available"`
+	Locked    float64   `json:"locked"`
+	Reserved  float64   `json:"reserved"`
+	Pending   float64   `json:"pending"`
+	Total     float64   `json:"total"`
+	Timestamp time.Time `json:"timestamp"`
+}
+
+// AssetRegisteredEvent represents versioned schema v1 for new exchange assets
+type AssetRegisteredEvent struct {
+	Version     string    `json:"version"` // "v1"
+	Symbol      string    `json:"symbol"`
+	Name        string    `json:"name"`
+	Type        string    `json:"type"`
+	Precision   int       `json:"precision"`
+	BaseNetwork string    `json:"base_network"`
+	Timestamp   time.Time `json:"timestamp"`
+}
+
+// AddressGeneratedEvent represents versioned schema v1 for address generation
+type AddressGeneratedEvent struct {
+	Version        string    `json:"version"` // "v1"
+	UserID         string    `json:"user_id"`
+	Network        string    `json:"network"`
+	Address        string    `json:"address"`
+	DerivationPath string    `json:"derivation_path"`
+	Timestamp      time.Time `json:"timestamp"`
+}
+
+// WalletValidatedEvent represents versioned schema v1 for structural health or integrity validations
+type WalletValidatedEvent struct {
+	Version    string    `json:"version"` // "v1"
+	WalletID   string    `json:"wallet_id"`
+	IsValid    bool      `json:"is_valid"`
+	ErrorCount int       `json:"error_count"`
+	Timestamp  time.Time `json:"timestamp"`
+}
+
+// WalletAuditEvent represents versioned schema v1 for ledger auditing trail
+type WalletAuditEvent struct {
+	Version     string    `json:"version"` // "v1"
+	AuditID     string    `json:"audit_id"`
+	UserID      string    `json:"user_id"`
+	WalletID    string    `json:"wallet_id"`
+	Asset       string    `json:"asset"`
+	Action      string    `json:"action"`
+	Amount      float64   `json:"amount"`
+	PrevBalance float64   `json:"prev_balance"`
+	NewBalance  float64   `json:"new_balance"`
+	Hash        string    `json:"hash"`
+	Timestamp   time.Time `json:"timestamp"`
+}

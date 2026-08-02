@@ -9,5 +9,10 @@ use (
 	./packages/logger
 	./packages/security
 	./packages/types
+	./packages/blockchain
+	./packages/assets
+	./packages/address
+	./packages/ledger-common
+	./packages/wallet
 	./tests
 )

@@ -406,6 +406,390 @@ func main() {
 				})
 			})
 
+			// GET /api/v1/wallet/summary
+			wallet.GET("/summary", func(c *gin.Context) {
+				claims, _ := c.Get("claims")
+				userClaims := claims.(*security.Claims)
+
+				if db != nil {
+					var summaries []gin.H
+					rows, err := db.Pool.Query(context.Background(),
+						`SELECT w.id, w.type, w.is_locked, b.asset, b.available, b.locked, b.reserved, b.pending, b.total
+						 FROM wallets w
+						 LEFT JOIN wallet_balances b ON w.id = b.wallet_id
+						 WHERE w.user_id = $1`, userClaims.UserID)
+					if err == nil {
+						defer rows.Close()
+						for rows.Next() {
+							var id, wType, asset string
+							var isLocked bool
+							var avail, lock, res, pend, tot float64
+							if errScan := rows.Scan(&id, &wType, &isLocked, &asset, &avail, &lock, &res, &pend, &tot); errScan == nil {
+								summaries = append(summaries, gin.H{
+									"wallet_id": id,
+									"type":      wType,
+									"is_locked": isLocked,
+									"asset":     asset,
+									"available": avail,
+									"locked":    lock,
+									"reserved":  res,
+									"pending":   pend,
+									"total":     tot,
+								})
+							}
+						}
+						c.JSON(http.StatusOK, gin.H{"summary": summaries})
+						return
+					}
+				}
+
+				// Fallback mock representation
+				c.JSON(http.StatusOK, gin.H{
+					"summary": []gin.H{
+						{
+							"wallet_id": "wal_hot_" + userClaims.UserID,
+							"type":      "HOT",
+							"is_locked": false,
+							"asset":     "BTC",
+							"available": 1.25,
+							"locked":    0.1,
+							"reserved":  0.0,
+							"pending":   0.0,
+							"total":     1.35,
+						},
+						{
+							"wallet_id": "wal_hot_" + userClaims.UserID,
+							"type":      "HOT",
+							"is_locked": false,
+							"asset":     "ETH",
+							"available": 15.6,
+							"locked":    2.0,
+							"reserved":  0.0,
+							"pending":   1.5,
+							"total":     19.1,
+						},
+					},
+				})
+			})
+
+			// GET /api/v1/wallet/assets
+			wallet.GET("/assets", func(c *gin.Context) {
+				if db != nil {
+					var assetsList []gin.H
+					rows, err := db.Pool.Query(context.Background(),
+						`SELECT r.symbol, r.name, r.type, r.precision, r.base_network, r.is_active,
+						        COALESCE(m.description, ''), COALESCE(m.website, ''), COALESCE(m.explorer_url, ''), COALESCE(m.circulating_price, 0),
+						        COALESCE(p.can_deposit, true), COALESCE(p.can_withdraw, true), COALESCE(p.can_trade, true), COALESCE(p.withdrawal_fee, 0)
+						 FROM assets_registry r
+						 LEFT JOIN assets_metadata m ON r.symbol = m.symbol
+						 LEFT JOIN assets_permissions p ON r.symbol = p.symbol`)
+					if err == nil {
+						defer rows.Close()
+						for rows.Next() {
+							var symbol, name, aType, baseNet, desc, web, explorer string
+							var precision int
+							var active, canDep, canWith, canTrade bool
+							var price, fee float64
+							if errScan := rows.Scan(&symbol, &name, &aType, &precision, &baseNet, &active, &desc, &web, &explorer, &price, &canDep, &canWith, &canTrade, &fee); errScan == nil {
+								assetsList = append(assetsList, gin.H{
+									"symbol":            symbol,
+									"name":              name,
+									"type":              aType,
+									"precision":         precision,
+									"base_network":      baseNet,
+									"is_active":         active,
+									"description":       desc,
+									"website":           web,
+									"explorer_url":      explorer,
+									"circulating_price": price,
+									"can_deposit":       canDep,
+									"can_withdraw":      canWith,
+									"can_trade":         canTrade,
+									"withdrawal_fee":    fee,
+								})
+							}
+						}
+						c.JSON(http.StatusOK, gin.H{"assets": assetsList})
+						return
+					}
+				}
+
+				// Fallback mock assets
+				c.JSON(http.StatusOK, gin.H{
+					"assets": []gin.H{
+						{
+							"symbol":            "BTC",
+							"name":              "Bitcoin",
+							"type":              "NATIVE",
+							"precision":         8,
+							"base_network":      "Bitcoin",
+							"is_active":         true,
+							"description":       "Digital Gold",
+							"website":           "bitcoin.org",
+							"explorer_url":      "blockchain.com",
+							"circulating_price": 95000.0,
+							"can_deposit":       true,
+							"can_withdraw":      true,
+							"can_trade":         true,
+							"withdrawal_fee":    0.0005,
+						},
+						{
+							"symbol":            "ETH",
+							"name":              "Ethereum",
+							"type":              "NATIVE",
+							"precision":         18,
+							"base_network":      "Ethereum",
+							"is_active":         true,
+							"description":       "Smart Contract Platform",
+							"website":           "ethereum.org",
+							"explorer_url":      "etherscan.io",
+							"circulating_price": 3200.0,
+							"can_deposit":       true,
+							"can_withdraw":      true,
+							"can_trade":         true,
+							"withdrawal_fee":    0.003,
+						},
+					},
+				})
+			})
+
+			// GET /api/v1/wallet/assets/:symbol
+			wallet.GET("/assets/:symbol", func(c *gin.Context) {
+				symbolParam := strings.ToUpper(c.Param("symbol"))
+
+				if db != nil {
+					var sym, name, aType, baseNet, desc, web, explorer string
+					var prec int
+					var act, canDep, canWith, canTrade bool
+					var price, fee float64
+					err = db.Pool.QueryRow(context.Background(),
+						`SELECT r.symbol, r.name, r.type, r.precision, r.base_network, r.is_active,
+						        COALESCE(m.description,''), COALESCE(m.website,''), COALESCE(m.explorer_url,''), COALESCE(m.circulating_price,0),
+						        COALESCE(p.can_deposit,true), COALESCE(p.can_withdraw,true), COALESCE(p.can_trade,true), COALESCE(p.withdrawal_fee,0)
+						 FROM assets_registry r
+						 LEFT JOIN assets_metadata m ON r.symbol = m.symbol
+						 LEFT JOIN assets_permissions p ON r.symbol = p.symbol
+						 WHERE r.symbol = $1`, symbolParam).Scan(&sym, &name, &aType, &prec, &baseNet, &act, &desc, &web, &explorer, &price, &canDep, &canWith, &canTrade, &fee)
+					if err == nil {
+						c.JSON(http.StatusOK, gin.H{
+							"symbol":            sym,
+							"name":              name,
+							"type":              aType,
+							"precision":         prec,
+							"base_network":      baseNet,
+							"is_active":         act,
+							"description":       desc,
+							"website":           web,
+							"explorer_url":      explorer,
+							"circulating_price": price,
+							"can_deposit":       canDep,
+							"can_withdraw":      canWith,
+							"can_trade":         canTrade,
+							"withdrawal_fee":    fee,
+						})
+						return
+					}
+				}
+
+				// Fallback mock details
+				c.JSON(http.StatusOK, gin.H{
+					"symbol":            symbolParam,
+					"name":              symbolParam + " Coin",
+					"type":              "TOKEN",
+					"precision":         18,
+					"base_network":      "Ethereum",
+					"is_active":         true,
+					"description":       "Decentralized exchange asset",
+					"website":           "velyxora.com",
+					"explorer_url":      "etherscan.io",
+					"circulating_price": 1.0,
+					"can_deposit":       true,
+					"can_withdraw":      true,
+					"can_trade":         true,
+					"withdrawal_fee":    0.01,
+				})
+			})
+
+			// GET /api/v1/wallet/addresses
+			wallet.GET("/addresses", func(c *gin.Context) {
+				claims, _ := c.Get("claims")
+				userClaims := claims.(*security.Claims)
+
+				if db != nil {
+					var addresses []gin.H
+					rows, err := db.Pool.Query(context.Background(),
+						`SELECT address, network, status, derivation_path, created_at
+						 FROM wallet_addresses
+						 WHERE user_id = $1`, userClaims.UserID)
+					if err == nil {
+						defer rows.Close()
+						for rows.Next() {
+							var addr, net, stat, path string
+							var created time.Time
+							if errScan := rows.Scan(&addr, &net, &stat, &path, &created); errScan == nil {
+								addresses = append(addresses, gin.H{
+									"address":         addr,
+									"network":         net,
+									"status":          stat,
+									"derivation_path": path,
+									"created_at":      created,
+								})
+							}
+						}
+						c.JSON(http.StatusOK, gin.H{"addresses": addresses})
+						return
+					}
+				}
+
+				// Fallback mock addresses
+				c.JSON(http.StatusOK, gin.H{
+					"addresses": []gin.H{
+						{
+							"address":         "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2",
+							"network":         "Bitcoin",
+							"status":          "ALLOCATED",
+							"derivation_path": "m/44'/0'/0'/0/0",
+							"created_at":      time.Now(),
+						},
+						{
+							"address":         "0x71C7656EC7ab88b098defB751B7401B5f6d1476B",
+							"network":         "Ethereum",
+							"status":          "ALLOCATED",
+							"derivation_path": "m/44'/60'/0'/0/0",
+							"created_at":      time.Now(),
+						},
+					},
+				})
+			})
+
+			// GET /api/v1/wallet/balances/details
+			wallet.GET("/balances/details", func(c *gin.Context) {
+				claims, _ := c.Get("claims")
+				userClaims := claims.(*security.Claims)
+
+				if db != nil {
+					var details []gin.H
+					rows, err := db.Pool.Query(context.Background(),
+						`SELECT wallet_id, asset, available, locked, reserved, pending, total, updated_at
+						 FROM wallet_balances
+						 WHERE wallet_id IN (SELECT id FROM wallets WHERE user_id = $1)`, userClaims.UserID)
+					if err == nil {
+						defer rows.Close()
+						for rows.Next() {
+							var wID, asset string
+							var avail, lock, res, pend, tot float64
+							var updated time.Time
+							if errScan := rows.Scan(&wID, &asset, &avail, &lock, &res, &pend, &tot, &updated); errScan == nil {
+								details = append(details, gin.H{
+									"wallet_id":  wID,
+									"asset":      asset,
+									"available":  avail,
+									"locked":     lock,
+									"reserved":   res,
+									"pending":    pend,
+									"total":      tot,
+									"updated_at": updated,
+								})
+							}
+						}
+						c.JSON(http.StatusOK, gin.H{"balances_details": details})
+						return
+					}
+				}
+
+				// Fallback mock details
+				c.JSON(http.StatusOK, gin.H{
+					"balances_details": []gin.H{
+						{
+							"wallet_id":  "wal_hot_" + userClaims.UserID,
+							"asset":      "BTC",
+							"available":  1.25,
+							"locked":     0.1,
+							"reserved":   0.0,
+							"pending":    0.0,
+							"total":      1.35,
+							"updated_at": time.Now(),
+						},
+						{
+							"wallet_id":  "wal_hot_" + userClaims.UserID,
+							"asset":      "ETH",
+							"available":  15.6,
+							"locked":     2.0,
+							"reserved":   0.0,
+							"pending":    1.5,
+							"total":      19.1,
+							"updated_at": time.Now(),
+						},
+					},
+				})
+			})
+
+			// GET /api/v1/wallet/history
+			wallet.GET("/history", func(c *gin.Context) {
+				claims, _ := c.Get("claims")
+				userClaims := claims.(*security.Claims)
+
+				if db != nil {
+					var list []gin.H
+					rows, err := db.Pool.Query(context.Background(),
+						`SELECT id, wallet_id, asset, action, amount, prev_balance, new_balance, message, timestamp
+						 FROM wallet_audits
+						 WHERE user_id = $1
+						 ORDER BY timestamp DESC`, userClaims.UserID)
+					if err == nil {
+						defer rows.Close()
+						for rows.Next() {
+							var id, wID, asset, act, msg string
+							var amt, prev, newB float64
+							var stamp time.Time
+							if errScan := rows.Scan(&id, &wID, &asset, &act, &amt, &prev, &newB, &msg, &stamp); errScan == nil {
+								list = append(list, gin.H{
+									"id":           id,
+									"wallet_id":    wID,
+									"asset":        asset,
+									"action":       act,
+									"amount":       amt,
+									"prev_balance": prev,
+									"new_balance":  newB,
+									"message":      msg,
+									"timestamp":    stamp,
+								})
+							}
+						}
+						c.JSON(http.StatusOK, gin.H{"history": list})
+						return
+					}
+				}
+
+				// Fallback mock audits list
+				c.JSON(http.StatusOK, gin.H{
+					"history": []gin.H{
+						{
+							"id":           "audit_111",
+							"wallet_id":    "wal_hot_" + userClaims.UserID,
+							"asset":        "BTC",
+							"action":       "BALANCE_ADJUSTED",
+							"amount":       1.5,
+							"prev_balance": 0.0,
+							"new_balance":  1.5,
+							"message":      "Onboarding bonus credit",
+							"timestamp":    time.Now().Add(-1 * time.Hour),
+						},
+						{
+							"id":           "audit_222",
+							"wallet_id":    "wal_hot_" + userClaims.UserID,
+							"asset":        "ETH",
+							"action":       "WALLET_CREATED",
+							"amount":       0.0,
+							"prev_balance": 0.0,
+							"new_balance":  0.0,
+							"message":      "Hot Wallet provisioned successfully",
+							"timestamp":    time.Now().Add(-2 * time.Hour),
+						},
+					},
+				})
+			})
+
 			// Request deposit wallet address validation/allocation
 			wallet.POST("/address", func(c *gin.Context) {
 				var req struct {

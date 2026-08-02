@@ -471,6 +471,180 @@ var schemaMigrations = []Migration{
 			);
 		`,
 	},
+	{
+		ID:   30,
+		Name: "create_blockchain_networks_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS blockchain_networks (
+				id VARCHAR(100) PRIMARY KEY,
+				name VARCHAR(255) NOT NULL,
+				derivation_path VARCHAR(255) NOT NULL,
+				is_active BOOLEAN DEFAULT TRUE NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_blockchain_networks_active ON blockchain_networks (is_active);
+		`,
+	},
+	{
+		ID:   31,
+		Name: "create_wallets_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS wallets (
+				id VARCHAR(255) PRIMARY KEY,
+				user_id VARCHAR(255) NOT NULL,
+				type VARCHAR(100) NOT NULL,
+				is_locked BOOLEAN DEFAULT FALSE NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_wallets_user_id ON wallets (user_id);
+			CREATE INDEX IF NOT EXISTS idx_wallets_type ON wallets (type);
+		`,
+	},
+	{
+		ID:   32,
+		Name: "create_assets_registry_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS assets_registry (
+				symbol VARCHAR(50) PRIMARY KEY,
+				name VARCHAR(255) NOT NULL,
+				type VARCHAR(50) NOT NULL,
+				precision INT DEFAULT 8 NOT NULL,
+				base_network VARCHAR(100) NOT NULL,
+				is_active BOOLEAN DEFAULT TRUE NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_assets_registry_active ON assets_registry (is_active);
+		`,
+	},
+	{
+		ID:   33,
+		Name: "create_assets_metadata_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS assets_metadata (
+				symbol VARCHAR(50) PRIMARY KEY,
+				contract_address VARCHAR(255) DEFAULT '' NOT NULL,
+				logo_url VARCHAR(255) DEFAULT '' NOT NULL,
+				description TEXT DEFAULT '' NOT NULL,
+				website VARCHAR(255) DEFAULT '' NOT NULL,
+				explorer_url VARCHAR(255) DEFAULT '' NOT NULL,
+				total_supply VARCHAR(255) DEFAULT '' NOT NULL,
+				circulating_price DECIMAL(36, 18) DEFAULT 0.0 NOT NULL,
+				updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				FOREIGN KEY (symbol) REFERENCES assets_registry (symbol) ON DELETE CASCADE
+			);
+		`,
+	},
+	{
+		ID:   34,
+		Name: "create_assets_permissions_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS assets_permissions (
+				symbol VARCHAR(50) PRIMARY KEY,
+				can_deposit BOOLEAN DEFAULT TRUE NOT NULL,
+				can_withdraw BOOLEAN DEFAULT TRUE NOT NULL,
+				can_trade BOOLEAN DEFAULT TRUE NOT NULL,
+				min_deposit_amount DECIMAL(36, 18) DEFAULT 0.0 NOT NULL,
+				min_withdraw_amount DECIMAL(36, 18) DEFAULT 0.0 NOT NULL,
+				max_daily_withdrawal DECIMAL(36, 18) DEFAULT 1000.0 NOT NULL,
+				withdrawal_fee DECIMAL(36, 18) DEFAULT 0.0 NOT NULL,
+				updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				FOREIGN KEY (symbol) REFERENCES assets_registry (symbol) ON DELETE CASCADE
+			);
+		`,
+	},
+	{
+		ID:   35,
+		Name: "create_wallet_balances_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS wallet_balances (
+				wallet_id VARCHAR(255) NOT NULL,
+				asset VARCHAR(50) NOT NULL,
+				available DECIMAL(36, 18) DEFAULT 0.0 NOT NULL,
+				locked DECIMAL(36, 18) DEFAULT 0.0 NOT NULL,
+				reserved DECIMAL(36, 18) DEFAULT 0.0 NOT NULL,
+				pending DECIMAL(36, 18) DEFAULT 0.0 NOT NULL,
+				total DECIMAL(36, 18) DEFAULT 0.0 NOT NULL,
+				updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				PRIMARY KEY (wallet_id, asset),
+				FOREIGN KEY (wallet_id) REFERENCES wallets (id) ON DELETE CASCADE
+			);
+			CREATE INDEX IF NOT EXISTS idx_wallet_balances_asset ON wallet_balances (asset);
+		`,
+	},
+	{
+		ID:   36,
+		Name: "create_wallet_balance_history_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS wallet_balance_history (
+				id VARCHAR(255) PRIMARY KEY,
+				wallet_id VARCHAR(255) NOT NULL,
+				asset VARCHAR(50) NOT NULL,
+				available DECIMAL(36, 18) NOT NULL,
+				locked DECIMAL(36, 18) NOT NULL,
+				reserved DECIMAL(36, 18) NOT NULL,
+				pending DECIMAL(36, 18) NOT NULL,
+				total DECIMAL(36, 18) NOT NULL,
+				timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				FOREIGN KEY (wallet_id) REFERENCES wallets (id) ON DELETE CASCADE
+			);
+			CREATE INDEX IF NOT EXISTS idx_balance_history_wallet ON wallet_balance_history (wallet_id);
+			CREATE INDEX IF NOT EXISTS idx_balance_history_asset ON wallet_balance_history (asset);
+		`,
+	},
+	{
+		ID:   37,
+		Name: "create_wallet_addresses_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS wallet_addresses (
+				address VARCHAR(255) PRIMARY KEY,
+				user_id VARCHAR(255) NOT NULL,
+				network VARCHAR(100) NOT NULL,
+				public_key BYTEA NOT NULL,
+				derivation_path VARCHAR(255) NOT NULL,
+				memo VARCHAR(255) DEFAULT '' NOT NULL,
+				status VARCHAR(50) NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_wallet_addresses_user_network ON wallet_addresses (user_id, network);
+		`,
+	},
+	{
+		ID:   38,
+		Name: "create_wallet_events_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS wallet_events (
+				id VARCHAR(255) PRIMARY KEY,
+				event_type VARCHAR(100) NOT NULL,
+				wallet_id VARCHAR(255) NOT NULL,
+				payload TEXT NOT NULL,
+				timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_wallet_events_type_wallet ON wallet_events (event_type, wallet_id);
+		`,
+	},
+	{
+		ID:   39,
+		Name: "create_wallet_audits_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS wallet_audits (
+				id VARCHAR(255) PRIMARY KEY,
+				user_id VARCHAR(255) NOT NULL,
+				wallet_id VARCHAR(255) NOT NULL,
+				asset VARCHAR(50) NOT NULL,
+				action VARCHAR(100) NOT NULL,
+				amount DECIMAL(36, 18) NOT NULL,
+				prev_balance DECIMAL(36, 18) NOT NULL,
+				new_balance DECIMAL(36, 18) NOT NULL,
+				message TEXT NOT NULL,
+				prev_hash VARCHAR(255) NOT NULL,
+				hash VARCHAR(255) NOT NULL,
+				timestamp TIMESTAMP NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_wallet_audits_user_asset ON wallet_audits (user_id, asset);
+			CREATE INDEX IF NOT EXISTS idx_wallet_audits_wallet ON wallet_audits (wallet_id);
+		`,
+	},
 }
 
 // RunMigrations executes schema migration steps on the pgx connection pool

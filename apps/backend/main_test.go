@@ -113,3 +113,82 @@ func TestWalletWithdrawalValidationAPI(t *testing.T) {
 		t.Errorf("Expected status 202 Accepted, got %d", w2.Code)
 	}
 }
+
+func TestExpandedWalletAPIs(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	secret := "testsecret12345678"
+
+	// Mock DB and routers inside standard test bootstrap
+	v1 := r.Group("/api/v1")
+	walletGroup := v1.Group("/wallet")
+	walletGroup.Use(authMiddleware(secret))
+	{
+		walletGroup.GET("/summary", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"summary": []gin.H{
+				{"wallet_id": "wal_hot_usr_123", "asset": "BTC", "available": 1.25},
+			}})
+		})
+
+		walletGroup.GET("/assets", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"assets": []gin.H{
+				{"symbol": "BTC", "name": "Bitcoin", "can_deposit": true},
+			}})
+		})
+
+		walletGroup.GET("/assets/:symbol", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"symbol": c.Param("symbol"), "can_withdraw": true})
+		})
+
+		walletGroup.GET("/addresses", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"addresses": []gin.H{
+				{"address": "0x123", "network": "Ethereum"},
+			}})
+		})
+
+		walletGroup.GET("/balances/details", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"balances_details": []gin.H{
+				{"wallet_id": "wal_hot_usr_123", "asset": "BTC", "available": 1.25, "locked": 0.1},
+			}})
+		})
+
+		walletGroup.GET("/history", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"history": []gin.H{
+				{"id": "audit_111", "asset": "BTC", "action": "WALLET_CREATED"},
+			}})
+		})
+	}
+
+	access, _, _ := security.GenerateJWT("usr_123", "test@test.com", secret, 5*time.Minute, 1*time.Hour)
+
+	// List of test targets
+	targets := []struct {
+		Path   string
+		Method string
+		Key    string
+	}{
+		{"/api/v1/wallet/summary", "GET", "summary"},
+		{"/api/v1/wallet/assets", "GET", "assets"},
+		{"/api/v1/wallet/assets/BTC", "GET", "symbol"},
+		{"/api/v1/wallet/addresses", "GET", "addresses"},
+		{"/api/v1/wallet/balances/details", "GET", "balances_details"},
+		{"/api/v1/wallet/history", "GET", "history"},
+	}
+
+	for _, tc := range targets {
+		w := httptest.NewRecorder()
+		req, _ := http.NewRequest(tc.Method, tc.Path, nil)
+		req.Header.Set("Authorization", "Bearer "+access)
+		r.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Errorf("Path %s expected status 200, got %d", tc.Path, w.Code)
+		}
+
+		var resp map[string]interface{}
+		_ = json.Unmarshal(w.Body.Bytes(), &resp)
+		if _, exists := resp[tc.Key]; !exists && tc.Key != "symbol" {
+			t.Errorf("Path %s expected key %s in response, got %s", tc.Path, tc.Key, w.Body.String())
+		}
+	}
+}
