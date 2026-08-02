@@ -4,15 +4,16 @@ use (
 	./apps/backend
 	./apps/matching-engine
 	./apps/wallet-service
+	./packages/address
+	./packages/assets
+	./packages/blockchain
 	./packages/common
 	./packages/database
+	./packages/deposits
+	./packages/ledger-common
 	./packages/logger
 	./packages/security
 	./packages/types
-	./packages/blockchain
-	./packages/assets
-	./packages/address
-	./packages/ledger-common
 	./packages/wallet
 	./tests
 )

@@ -142,3 +142,95 @@ All private REST routes require a valid JWT passed in the standard Authorization
   ]
 }
 ```
+
+---
+
+## 3. Deposit Engine Subsystem APIs
+
+### 3.1 Get Deposit History
+* **Route:** `GET /api/v1/wallet/deposits/history`
+* **Access:** Private (Authenticated)
+* **Response Output:**
+```json
+{
+  "deposits": [
+    {
+      "id": "dep_mock_111",
+      "user_id": "usr_123",
+      "asset": "BTC",
+      "amount": 0.15,
+      "fee": 0.0,
+      "address": "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2",
+      "tx_hash": "0x123abc456def7890_btc",
+      "confirmations": 6,
+      "status": "COMPLETED",
+      "created_at": "2026-08-02T10:00:00Z",
+      "updated_at": "2026-08-02T11:00:00Z"
+    }
+  ]
+}
+```
+
+### 3.2 Get Deposit Status
+* **Route:** `GET /api/v1/wallet/deposits/status/:id`
+* **Access:** Private (Authenticated)
+* **Response Output:**
+```json
+{
+  "id": "dep_mock_111",
+  "status": "COMPLETED",
+  "confirmations": 6
+}
+```
+
+### 3.3 Get Deposit Details
+* **Route:** `GET /api/v1/wallet/deposits/details/:id`
+* **Access:** Private (Authenticated)
+* **Response Output:**
+```json
+{
+  "id": "dep_mock_111",
+  "user_id": "usr_123",
+  "asset": "BTC",
+  "amount": 0.15,
+  "fee": 0.0,
+  "address": "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2",
+  "tx_hash": "0x123abc456def7890_btc",
+  "confirmations": 6,
+  "status": "COMPLETED",
+  "created_at": "2026-08-02T10:00:00Z",
+  "updated_at": "2026-08-02T11:00:00Z"
+}
+```
+
+### 3.4 Lookup Blockchain Transaction
+* **Route:** `GET /api/v1/wallet/deposits/tx/:tx_hash`
+* **Access:** Private (Authenticated)
+* **Response Output:**
+```json
+{
+  "tx_hash": "0x123abc456def7890_btc",
+  "network": "Bitcoin",
+  "asset": "BTC",
+  "amount": 0.15,
+  "sender": "1SenderAddr_111",
+  "receiver": "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2",
+  "block_number": 750431,
+  "gas_used": 0,
+  "timestamp": "2026-08-02T10:00:00Z"
+}
+```
+
+### 3.5 Get Confirmation Status
+* **Route:** `GET /api/v1/wallet/deposits/confirmations/:id`
+* **Access:** Private (Authenticated)
+* **Response Output:**
+```json
+{
+  "deposit_id": "dep_mock_111",
+  "confirmations_count": 6,
+  "required_confirmations": 6,
+  "status": "COMPLETED",
+  "updated_at": "2026-08-02T11:00:00Z"
+}
+```

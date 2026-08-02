@@ -29,5 +29,21 @@ Chained SHA-256 ledger audit log.
 
 ---
 
-## 3. High Availability Indexes & Foreign Keys
+## 3. Deposit Engine Subsystem Tables
+
+### 3.1 blockchain_transactions
+Parsed block transaction profiles.
+* **Fields:** `tx_hash` (PK), `network`, `asset`, `amount`, `sender`, `receiver`, `block_number`, `gas_used`, `timestamp`
+
+### 3.2 deposit_confirmations
+Tracks real-time confirmation block depths.
+* **Fields:** `deposit_id` (PK), `confirmations_count`, `required_confirmations`, `status`, `updated_at`
+
+### 3.3 deposit_events
+Records audit events from deposit handlers.
+* **Fields:** `id` (PK), `event_type`, `deposit_id` (Index), `payload`, `timestamp`
+
+---
+
+## 4. High Availability Indexes & Foreign Keys
 Every table features cascading delete foreign keys linking back to `wallets` and `assets_registry` to preserve referential integrity, along with high-selectivity indexes to ensure sub-millisecond query execution times under heavy concurrent load.

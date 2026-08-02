@@ -34,3 +34,4 @@ Velyxora is an autonomous, high-throughput, low-latency, and ultra-secure crypto
 * **`packages/assets`:** Manages asset configs and deposit/withdrawal/trade limit permissions.
 * **`packages/address`:** Handles address registry lookup, allocation, and cryptographic signature verification.
 * **`packages/ledger-common`:** Secure chained hash auditing validation.
+* **`packages/deposits`:** Enterprise Deposit Engine and Confirmation Tracker, with duplicate block transaction validations, chain reorganization support, and orphan exclusion checks.
