@@ -490,3 +490,55 @@ func TestMarketSurveillanceVelocityAbuse(t *testing.T) {
 		t.Error("Expected abnormal cancellations rate spoofing alert to be flagged")
 	}
 }
+
+func TestFeeEngineVIPLevels(t *testing.T) {
+	fe := NewFeesEngine(0.0010, 0.0020)
+	userID := "vip_user"
+
+	// Level 0
+	if fe.GetUserVIPLevel(userID) != 0 {
+		t.Errorf("Expected VIP Level 0, got %d", fe.GetUserVIPLevel(userID))
+	}
+
+	// Level 2 (> 1M USD volume)
+	fe.SetUserVolume(userID, 1500000.0)
+	if fe.GetUserVIPLevel(userID) != 2 {
+		t.Errorf("Expected VIP Level 2, got %d", fe.GetUserVIPLevel(userID))
+	}
+
+	maker, taker := fe.GetFeeRates(userID)
+	if maker != 0.0002 || taker != 0.0010 {
+		t.Errorf("Expected Level 2 fee rates (0.02%%, 0.10%%), got %f and %f", maker, taker)
+	}
+}
+
+func TestFeeEngineReferrals(t *testing.T) {
+	fe := NewFeesEngine(0.0010, 0.0020)
+	userID := "user_referred"
+	referrerID := "partner_affiliate"
+
+	fe.RegisterReferral(userID, referrerID)
+
+	// Process trade match commissions split
+	ref, commission, revenue := fe.ProcessCommission(userID, "USDT", 100.0)
+	if ref != referrerID || commission != 20.0 || revenue != 80.0 {
+		t.Errorf("Referral commission split mismatch: ref %s, commission %f, revenue %f", ref, commission, revenue)
+	}
+
+	// Collected platform revenue check
+	if fe.GetAccumulatedRevenue("USDT") != 80.0 {
+		t.Errorf("Expected USDT accumulated platform revenue to be 80.0, got %f", fe.GetAccumulatedRevenue("USDT"))
+	}
+}
+
+func TestFeeEnginePromotionalOverrides(t *testing.T) {
+	fe := NewFeesEngine(0.0010, 0.0020)
+	userID := "user_override"
+
+	// 1. Fee Overrides
+	fe.SetUserFeeOverride(userID, 0.0005)
+	maker, taker := fe.GetFeeRates(userID)
+	if maker != 0.0005 || taker != 0.0005 {
+		t.Errorf("Expected overriden fee rate 0.05%%, got %f and %f", maker, taker)
+	}
+}

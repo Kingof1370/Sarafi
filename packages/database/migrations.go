@@ -364,6 +364,63 @@ var schemaMigrations = []Migration{
 			);
 		`,
 	},
+	{
+		ID:   22,
+		Name: "create_fee_rules_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS fee_rules (
+				id VARCHAR(255) PRIMARY KEY,
+				symbol VARCHAR(100) NOT NULL,
+				maker_rate DECIMAL(10, 8) NOT NULL,
+				taker_rate DECIMAL(10, 8) NOT NULL,
+				is_active BOOLEAN DEFAULT TRUE NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+		`,
+	},
+	{
+		ID:   23,
+		Name: "create_fee_history_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS fee_history (
+				id VARCHAR(255) PRIMARY KEY,
+				trade_id VARCHAR(255) NOT NULL,
+				user_id VARCHAR(255) NOT NULL,
+				fee_type VARCHAR(50) NOT NULL,
+				asset VARCHAR(50) NOT NULL,
+				amount DECIMAL(36, 18) NOT NULL,
+				timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+		`,
+	},
+	{
+		ID:   24,
+		Name: "create_vip_levels_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS vip_levels (
+				level INT PRIMARY KEY,
+				min_volume DECIMAL(36, 18) NOT NULL,
+				maker_rate DECIMAL(10, 8) NOT NULL,
+				taker_rate DECIMAL(10, 8) NOT NULL,
+				updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+		`,
+	},
+	{
+		ID:   25,
+		Name: "create_referral_commissions_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS referral_commissions (
+				id VARCHAR(255) PRIMARY KEY,
+				user_id VARCHAR(255) NOT NULL,
+				referrer_id VARCHAR(255) NOT NULL,
+				trade_id VARCHAR(255) NOT NULL,
+				amount DECIMAL(36, 18) NOT NULL,
+				asset VARCHAR(50) NOT NULL,
+				timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+		`,
+	},
 }
 
 // RunMigrations executes schema migration steps on the pgx connection pool
