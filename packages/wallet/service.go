@@ -16,6 +16,7 @@ import (
 	"velyxora/packages/blockchain"
 	"velyxora/packages/connectivity"
 	"velyxora/packages/deposits"
+	"velyxora/packages/keys"
 	"velyxora/packages/withdrawals"
 )
 
@@ -31,6 +32,7 @@ type PersistentWalletService struct {
 	depositEngine    *deposits.DepositEngine
 	withdrawalEngine *withdrawals.WithdrawalEngine
 	nodeManager      *connectivity.NodeManager
+	keyManager       *keys.KeyManager
 	log              *logger.Logger
 }
 
@@ -45,6 +47,7 @@ func NewPersistentWalletService(db *database.DB, producer *common.KafkaProducer,
 		depositEngine:    deposits.NewDepositEngine(),
 		withdrawalEngine: withdrawals.NewWithdrawalEngine(),
 		nodeManager:      connectivity.NewNodeManager(),
+		keyManager:       keys.NewKeyManager(nil),
 		log:              log,
 	}
 }
@@ -105,7 +108,19 @@ func (p *PersistentWalletService) Bootstrap(ctx context.Context) error {
 		}
 	}
 
-	// 3. Load existing wallets from Database if available
+	// 3. Register Standard HSM-Managed Keys
+	defaultKeys := []keys.KeyType{keys.TypeEd25519, keys.TypeECDSA}
+	for _, kt := range defaultKeys {
+		k, err := p.keyManager.GenerateNewKey(kt, true)
+		if err == nil && p.db != nil {
+			_, _ = p.db.Pool.Exec(ctx,
+				`INSERT INTO cryptographic_keys (id, version, type, public_key, fingerprint, status, expiration_date, is_hsm_managed)
+				 VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (id) DO NOTHING`,
+				k.ID, k.Version, string(k.Type), k.PublicKey, k.Fingerprint, string(k.Status), k.ExpirationDate, k.IsHSMManaged)
+		}
+	}
+
+	// 4. Load existing wallets from Database if available
 	if p.db != nil {
 		rows, err := p.db.Pool.Query(ctx, "SELECT id, user_id, type, is_locked FROM wallets")
 		if err == nil {
@@ -158,6 +173,11 @@ func (p *PersistentWalletService) GetWithdrawalEngine() *withdrawals.WithdrawalE
 // GetNodeManager retrieves the internal NodeManager
 func (p *PersistentWalletService) GetNodeManager() *connectivity.NodeManager {
 	return p.nodeManager
+}
+
+// GetKeyManager retrieves the internal KeyManager
+func (p *PersistentWalletService) GetKeyManager() *keys.KeyManager {
+	return p.keyManager
 }
 
 // ProvisionWallet handles both DB persistence, state allocation, and Kafka notifications

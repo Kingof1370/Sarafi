@@ -867,6 +867,83 @@ var schemaMigrations = []Migration{
 			CREATE INDEX IF NOT EXISTS idx_node_metrics_node ON node_metrics (node_id);
 		`,
 	},
+	{
+		ID:   54,
+		Name: "create_cryptographic_keys_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS cryptographic_keys (
+				id VARCHAR(255) PRIMARY KEY,
+				version INT NOT NULL,
+				type VARCHAR(50) NOT NULL,
+				public_key BYTEA NOT NULL,
+				fingerprint VARCHAR(255) NOT NULL,
+				status VARCHAR(50) NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				expiration_date TIMESTAMP NOT NULL,
+				is_hsm_managed BOOLEAN DEFAULT FALSE NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_crypto_keys_status ON cryptographic_keys (status);
+			CREATE INDEX IF NOT EXISTS idx_crypto_keys_fingerprint ON cryptographic_keys (fingerprint);
+		`,
+	},
+	{
+		ID:   55,
+		Name: "create_key_rotation_history_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS key_rotation_history (
+				id VARCHAR(255) PRIMARY KEY,
+				old_key_id VARCHAR(255) NOT NULL,
+				new_key_id VARCHAR(255) NOT NULL,
+				rotated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_key_rotation_old ON key_rotation_history (old_key_id);
+			CREATE INDEX IF NOT EXISTS idx_key_rotation_new ON key_rotation_history (new_key_id);
+		`,
+	},
+	{
+		ID:   56,
+		Name: "create_key_audit_logs_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS key_audit_logs (
+				id VARCHAR(255) PRIMARY KEY,
+				key_id VARCHAR(255) NOT NULL,
+				action VARCHAR(100) NOT NULL,
+				message TEXT NOT NULL,
+				timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_key_audit_logs_id ON key_audit_logs (key_id);
+		`,
+	},
+	{
+		ID:   57,
+		Name: "create_signature_requests_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS signature_requests (
+				id VARCHAR(255) PRIMARY KEY,
+				raw_data BYTEA NOT NULL,
+				required_approvals INT NOT NULL,
+				current_approvals INT NOT NULL,
+				status VARCHAR(50) NOT NULL,
+				timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_sig_requests_status ON signature_requests (status);
+		`,
+	},
+	{
+		ID:   58,
+		Name: "create_signature_approvals_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS signature_approvals (
+				id VARCHAR(255) PRIMARY KEY,
+				signature_request_id VARCHAR(255) NOT NULL,
+				admin_id VARCHAR(255) NOT NULL,
+				signature BYTEA NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				FOREIGN KEY (signature_request_id) REFERENCES signature_requests (id) ON DELETE CASCADE
+			);
+			CREATE INDEX IF NOT EXISTS idx_sig_approvals_req ON signature_approvals (signature_request_id);
+		`,
+	},
 }
 
 // RunMigrations executes schema migration steps on the pgx connection pool

@@ -242,6 +242,35 @@ func TestExpandedWalletAPIs(t *testing.T) {
 		walletGroup.GET("/blockchain/broadcast/:id", func(c *gin.Context) {
 			c.JSON(http.StatusOK, gin.H{"withdrawal_id": c.Param("id"), "tx_hash": "0x123"})
 		})
+
+		// Key Management Routes
+		walletGroup.GET("/keys/status", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"keys": []gin.H{
+				{"id": "key_1_v1", "status": "ACTIVE"},
+			}})
+		})
+
+		walletGroup.GET("/keys/rotation", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"rotation_history": []gin.H{
+				{"id": "rot_1", "old_key_id": "key_old"},
+			}})
+		})
+
+		walletGroup.GET("/keys/signature-requests", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"signature_requests": []gin.H{
+				{"id": "sig_req_1", "status": "PENDING"},
+			}})
+		})
+
+		walletGroup.POST("/keys/approve-signature/:id", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"signature_request_id": c.Param("id"), "status": "COMPLETED"})
+		})
+
+		walletGroup.GET("/keys/audit", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"key_audit_logs": []gin.H{
+				{"id": "aud_1", "action": "KEY_GENERATED"},
+			}})
+		})
 	}
 
 	access, _, _ := security.GenerateJWT("usr_123", "test@test.com", secret, 5*time.Minute, 1*time.Hour)
@@ -275,6 +304,11 @@ func TestExpandedWalletAPIs(t *testing.T) {
 		{"/api/v1/wallet/blockchain/health", "GET", "health_metrics"},
 		{"/api/v1/wallet/blockchain/sync", "GET", "sync_history"},
 		{"/api/v1/wallet/blockchain/broadcast/wth_123", "GET", "tx_hash"},
+		{"/api/v1/wallet/keys/status", "GET", "keys"},
+		{"/api/v1/wallet/keys/rotation", "GET", "rotation_history"},
+		{"/api/v1/wallet/keys/signature-requests", "GET", "signature_requests"},
+		{"/api/v1/wallet/keys/approve-signature/sig_req_1", "POST", "status"},
+		{"/api/v1/wallet/keys/audit", "GET", "key_audit_logs"},
 	}
 
 	for _, tc := range targets {

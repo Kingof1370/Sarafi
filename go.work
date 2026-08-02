@@ -11,6 +11,7 @@ use (
 	./packages/connectivity
 	./packages/database
 	./packages/deposits
+	./packages/keys
 	./packages/ledger-common
 	./packages/logger
 	./packages/security
