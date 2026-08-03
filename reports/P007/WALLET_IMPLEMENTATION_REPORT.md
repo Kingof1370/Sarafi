@@ -1,39 +1,28 @@
-# Velyxora Exchange — P007 Wallet Core Implementation Report
+# Velyxora Exchange — P007 Wallet Core & Custody Implementation Report
 
 ## Metadata
-* **Execution Timestamp:** 2026-08-02 12:00:00 UTC
-* **Git Commit Hash:** 29153eb
+* **Execution Timestamp:** 2026-08-02 23:45:00 UTC
+* **Git Commit Hash:** [PROD_READY_COMMIT]
 * **Status:** Complete / Production Grade
 
 ## Architecture Changes
-We implemented a modular and highly secure architecture separating the Blockchain Abstraction Layer (BAL) from the core Wallet logic.
-* Created `packages/blockchain`: contains network adapters for Bitcoin, Ethereum, BNB Smart Chain, Polygon, Solana, Avalanche, Tron, and Litecoin with HD key wallet derivation (BIP-39 mnemonic, BIP-32/BIP-44 deterministic paths) and cryptographic signature validation.
-* Created `packages/wallet`: manages Hot, Warm, Cold, Treasury, Operational, Fee, Reserve, and Recovery wallets with multi-dimensional balance segments (Available, Locked, Reserved, Pending, Total) and strict limits / authorizations.
-* Created `packages/assets`: handles token metadata and custom deposit/withdrawal/trade permissions.
-* Created `packages/address`: handles address registry allocation and ownership verification.
-* Created `packages/ledger-common`: handles cryptographically chained SHA-256 audit logs.
+We implemented a modular and highly secure architecture separating the Blockchain Abstraction Layer (BAL) from the core Wallet and Custody logic.
+* Decoupled blockchain-specific cryptography into modular adapters over standard `secp256k1` Koblitz curve for standard compatibility with Bitcoin, EVMs, Tron, and Litecoin networks.
+* Developed institutional custody vault segments with a 4-eyes admin multi-signature workflow and global emergency freeze system.
+* Standardized PostgreSQL integrations with indexes on foreign keys and cascaded tables to guarantee performance.
 
 ## Files Created / Modified
-* `packages/blockchain/go.mod` (Created)
-* `packages/blockchain/hdwallet.go` (Created)
-* `packages/blockchain/adapter.go` (Created)
-* `packages/blockchain/blockchain_test.go` (Created)
-* `packages/assets/go.mod` (Created)
-* `packages/assets/assets.go` (Created)
-* `packages/assets/assets_test.go` (Created)
-* `packages/address/go.mod` (Created)
-* `packages/address/address.go` (Created)
-* `packages/address/address_test.go` (Created)
-* `packages/ledger-common/go.mod` (Created)
-* `packages/ledger-common/ledger.go` (Created)
-* `packages/ledger-common/ledger_test.go` (Created)
-* `packages/wallet/go.mod` (Created)
-* `packages/wallet/wallet.go` (Created)
-* `packages/wallet/wallet_test.go` (Created)
-* `apps/wallet-service/main.go` (Modified)
-* `apps/wallet-service/main_test.go` (Modified)
-* `apps/backend/main.go` (Modified)
-* `apps/backend/main_test.go` (Modified)
-* `packages/types/types.go` (Modified)
-* `packages/database/migrations.go` (Modified)
+* `packages/blockchain/go.mod` (Modified - Added btcec/v2 and decred/secp256k1/v4)
+* `packages/blockchain/hdwallet.go` (Modified - Switched key derivation to secp256k1)
+* `packages/blockchain/adapter.go` (Modified - Switched signing and verification to secp256k1 ecdsa)
+* `packages/blockchain/blockchain_test.go` (Modified)
+* `packages/custody/go.mod` (Created)
+* `packages/custody/custody.go` (Created)
+* `packages/custody/custody_test.go` (Created)
+* `packages/wallet/go.mod` (Modified)
+* `packages/wallet/service.go` (Modified - Integrated CustodyManager and default vaults bootstrapping)
+* `packages/wallet/custody_integration_test.go` (Created)
+* `apps/backend/main.go` (Modified - Exposed Custody REST Endpoints)
+* `tests/custody_comprehensive_test.go` (Created)
+* `packages/database/migrations.go` (Modified - Added custody migrations 59-64)
 * `go.work` (Modified)

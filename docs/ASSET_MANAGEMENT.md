@@ -42,3 +42,11 @@ The Assets module resides in `packages/assets` as a shared library and integrate
 
 ## 5. Event Flow
 Upon asset registration, an `AssetRegisteredEvent` is published onto the `velyxora-asset-registered` topic using Kafka versioned schemas.
+
+---
+
+## 6. Institutional Asset Partitioning
+Registered assets are partitioned across institutional custody vaults:
+- **Hot Vault (`v_hot`):** Retains active, liquid exchange balances to cover daily deposit/withdrawal loops.
+- **Warm Vault (`v_warm`):** Acts as a buffer and staging pool for immediate hot wallet replenishments.
+- **Cold Storage (`v_cold`, `v_deep_cold`):** Air-gapped key management holds 95%+ of institutional holdings under multi-signature administrative lock.

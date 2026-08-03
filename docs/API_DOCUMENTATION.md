@@ -234,3 +234,110 @@ All private REST routes require a valid JWT passed in the standard Authorization
   "updated_at": "2026-08-02T11:00:00Z"
 }
 ```
+
+---
+
+## 4. Digital Asset Custody REST APIs
+
+### 4.1 Get Custody Total Value Overview
+* **Route:** `GET /api/v1/wallet/custody/overview`
+* **Access:** Private (Authenticated Administrator)
+* **Response Output:**
+```json
+{
+  "total_custody_value_btc": 2500.50,
+  "status": "SECURE",
+  "active_alerts": 0
+}
+```
+
+### 4.2 List Institutional Custody Vaults
+* **Route:** `GET /api/v1/wallet/custody/vaults`
+* **Access:** Private (Authenticated Administrator)
+* **Response Output:**
+```json
+{
+  "vaults": [
+    {"id": "v_hot", "name": "Hot Exchange Vault", "type": "HOT", "is_locked": false},
+    {"id": "v_cold", "name": "Cold Core Storage", "type": "COLD", "is_locked": false},
+    {"id": "v_treasury", "name": "Corporate Treasury Vault", "type": "TREASURY_VAULT", "is_locked": false}
+  ]
+}
+```
+
+### 4.3 Request Custody Asset Transfer
+* **Route:** `POST /api/v1/wallet/custody/transfer`
+* **Access:** Private (Authenticated Administrator)
+* **Payload:**
+```json
+{
+  "from_vault_id": "v_cold",
+  "to_vault_id": "v_hot",
+  "asset": "BTC",
+  "amount": 150.0
+}
+```
+* **Response Output:**
+```json
+{
+  "message": "Custody transfer request submitted, pending administrative approvals",
+  "transfer_id": "cust_tx_1690934400000000_BTC",
+  "status": "REQUESTED"
+}
+```
+
+### 4.4 Approve Custody Asset Transfer (4-Eyes Workflow)
+* **Route:** `POST /api/v1/wallet/custody/approve/:id`
+* **Access:** Private (Authenticated Administrator)
+* **Response Output:**
+```json
+{
+  "message": "Custody transfer approval registered successfully",
+  "transfer_id": "cust_tx_1690934400000000_BTC",
+  "status": "COMPLETED"
+}
+```
+
+### 4.5 Get Asset Distribution across Vaults
+* **Route:** `GET /api/v1/wallet/custody/distribution`
+* **Access:** Private (Authenticated Administrator)
+* **Response Output:**
+```json
+{
+  "distribution": [
+    {"type": "HOT", "total_btc": 250.0},
+    {"type": "COLD", "total_btc": 2250.50}
+  ]
+}
+```
+
+### 4.6 Get Custody Audit Logs
+* **Route:** `GET /api/v1/wallet/custody/audit`
+* **Access:** Private (Authenticated Administrator)
+* **Response Output:**
+```json
+{
+  "custody_audits": [
+    {
+      "id": "aud_cust_1",
+      "vault_id": "v_cold",
+      "action": "DEPOSIT",
+      "amount": 500.0,
+      "message": "Initial reserve deposit",
+      "timestamp": "2026-08-02T10:00:00Z"
+    }
+  ]
+}
+```
+
+### 4.7 Execute System-Wide Emergency Action
+* **Route:** `POST /api/v1/wallet/custody/emergency/:action`
+* **Access:** Private (Authenticated Emergency Operator)
+* **Response Output:**
+```json
+{
+  "message": "Emergency action executed successfully",
+  "action": "FREEZE",
+  "status": "LOCKED"
+}
+```
