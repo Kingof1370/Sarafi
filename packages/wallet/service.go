@@ -17,7 +17,6 @@ import (
 	"velyxora/packages/connectivity"
 	"velyxora/packages/custody"
 	"velyxora/packages/deposits"
-	"velyxora/packages/monitoring"
 	"velyxora/packages/treasury"
 	"velyxora/packages/keys"
 	"velyxora/packages/withdrawals"
@@ -38,7 +37,6 @@ type PersistentWalletService struct {
 	keyManager       *keys.KeyManager
 	custodyMgr       *custody.CustodyManager
 	treasuryMgr      *treasury.TreasuryManager
-	monitoringService *monitoring.MonitoringService
 	log              *logger.Logger
 }
 
@@ -59,7 +57,6 @@ func NewPersistentWalletService(db *database.DB, producer *common.KafkaProducer,
 		keyManager:       keys.NewKeyManager(nil),
 		custodyMgr:       custody.NewCustodyManager(),
 		treasuryMgr:      treasury.NewTreasuryManager(),
-		monitoringService: monitoring.NewMonitoringService(),
 		log:              log,
 	}
 }
@@ -245,11 +242,6 @@ func (p *PersistentWalletService) GetCustodyManager() *custody.CustodyManager {
 // GetTreasuryManager retrieves the internal TreasuryManager
 func (p *PersistentWalletService) GetTreasuryManager() *treasury.TreasuryManager {
 	return p.treasuryMgr
-}
-
-// GetMonitoringService retrieves the internal MonitoringService
-func (p *PersistentWalletService) GetMonitoringService() *monitoring.MonitoringService {
-	return p.monitoringService
 }
 
 // ProvisionWallet handles both DB persistence, state allocation, and Kafka notifications
