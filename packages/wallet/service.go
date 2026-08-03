@@ -17,6 +17,7 @@ import (
 	"velyxora/packages/connectivity"
 	"velyxora/packages/custody"
 	"velyxora/packages/deposits"
+	"velyxora/packages/treasury"
 	"velyxora/packages/keys"
 	"velyxora/packages/withdrawals"
 )
@@ -35,6 +36,7 @@ type PersistentWalletService struct {
 	nodeManager      *connectivity.NodeManager
 	keyManager       *keys.KeyManager
 	custodyMgr       *custody.CustodyManager
+	treasuryMgr      *treasury.TreasuryManager
 	log              *logger.Logger
 }
 
@@ -54,6 +56,7 @@ func NewPersistentWalletService(db *database.DB, producer *common.KafkaProducer,
 		nodeManager:      connectivity.NewNodeManager(),
 		keyManager:       keys.NewKeyManager(nil),
 		custodyMgr:       custody.NewCustodyManager(),
+		treasuryMgr:      treasury.NewTreasuryManager(),
 		log:              log,
 	}
 }
@@ -148,6 +151,29 @@ func (p *PersistentWalletService) Bootstrap(ctx context.Context) error {
 		}
 	}
 
+	// 3.6. Register Standard Institutional Treasury Pools
+	if p.db != nil {
+		defaultPools := []struct {
+			ID   string
+			Name string
+			Type string
+		}{
+			{"p_hot", "Hot Exchange Liquidity", "HOT"},
+			{"p_warm", "Warm Operational Pool", "WARM"},
+			{"p_cold", "Cold Storage Capital", "COLD"},
+			{"p_treasury", "Corporate Treasury Core", "TREASURY"},
+			{"p_reserve", "Platform Reserves Asset", "RESERVE"},
+			{"p_insurance", "User Insolvency Insurance Fund", "INSURANCE"},
+			{"p_fee_wallet", "Platform Fee Accumulator", "FEE_WALLET"},
+			{"p_operational", "Operational Expense Wallet", "OPERATIONAL"},
+		}
+		for _, pID := range defaultPools {
+			_, _ = p.db.Pool.Exec(ctx,
+				"INSERT INTO treasury_pools (id, name, type) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING",
+				pID.ID, pID.Name, pID.Type)
+		}
+	}
+
 	// 4. Load existing wallets from Database if available
 	if p.db != nil {
 		rows, err := p.db.Pool.Query(ctx, "SELECT id, user_id, type, is_locked FROM wallets")
@@ -211,6 +237,11 @@ func (p *PersistentWalletService) GetKeyManager() *keys.KeyManager {
 // GetCustodyManager retrieves the internal CustodyManager
 func (p *PersistentWalletService) GetCustodyManager() *custody.CustodyManager {
 	return p.custodyMgr
+}
+
+// GetTreasuryManager retrieves the internal TreasuryManager
+func (p *PersistentWalletService) GetTreasuryManager() *treasury.TreasuryManager {
+	return p.treasuryMgr
 }
 
 // ProvisionWallet handles both DB persistence, state allocation, and Kafka notifications

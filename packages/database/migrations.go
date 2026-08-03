@@ -944,6 +944,209 @@ var schemaMigrations = []Migration{
 			CREATE INDEX IF NOT EXISTS idx_sig_approvals_req ON signature_approvals (signature_request_id);
 		`,
 	},
+	{
+		ID:   59,
+		Name: "create_custody_vaults_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS custody_vaults (
+				id VARCHAR(255) PRIMARY KEY,
+				name VARCHAR(255) NOT NULL,
+				type VARCHAR(50) NOT NULL,
+				is_locked BOOLEAN DEFAULT FALSE NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+		`,
+	},
+	{
+		ID:   60,
+		Name: "create_vault_assets_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS vault_assets (
+				vault_id VARCHAR(255) NOT NULL,
+				asset VARCHAR(50) NOT NULL,
+				balance DECIMAL(36, 18) DEFAULT 0.0 NOT NULL,
+				updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				PRIMARY KEY (vault_id, asset),
+				FOREIGN KEY (vault_id) REFERENCES custody_vaults (id) ON DELETE CASCADE
+			);
+		`,
+	},
+	{
+		ID:   61,
+		Name: "create_custody_transfers_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS custody_transfers (
+				id VARCHAR(255) PRIMARY KEY,
+				from_vault_id VARCHAR(255) NOT NULL,
+				to_vault_id VARCHAR(255) NOT NULL,
+				asset VARCHAR(50) NOT NULL,
+				amount DECIMAL(36, 18) NOT NULL,
+				status VARCHAR(50) NOT NULL,
+				required_approvals INT NOT NULL,
+				current_approvals INT NOT NULL,
+				timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				FOREIGN KEY (from_vault_id) REFERENCES custody_vaults (id) ON DELETE CASCADE,
+				FOREIGN KEY (to_vault_id) REFERENCES custody_vaults (id) ON DELETE CASCADE
+			);
+			CREATE INDEX IF NOT EXISTS idx_custody_trans_status ON custody_transfers (status);
+		`,
+	},
+	{
+		ID:   62,
+		Name: "create_custody_transfer_approvals_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS custody_transfer_approvals (
+				id VARCHAR(255) PRIMARY KEY,
+				transfer_id VARCHAR(255) NOT NULL,
+				admin_id VARCHAR(255) NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				FOREIGN KEY (transfer_id) REFERENCES custody_transfers (id) ON DELETE CASCADE
+			);
+			CREATE INDEX IF NOT EXISTS idx_custody_app_trans ON custody_transfer_approvals (transfer_id);
+		`,
+	},
+	{
+		ID:   63,
+		Name: "create_custody_audits_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS custody_audits (
+				id VARCHAR(255) PRIMARY KEY,
+				vault_id VARCHAR(255),
+				transfer_id VARCHAR(255),
+				asset VARCHAR(50) NOT NULL,
+				action VARCHAR(100) NOT NULL,
+				amount DECIMAL(36, 18) NOT NULL,
+				message TEXT NOT NULL,
+				timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_custody_audits_vault ON custody_audits (vault_id);
+		`,
+	},
+	{
+		ID:   64,
+		Name: "create_custody_emergency_actions_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS custody_emergency_actions (
+				id VARCHAR(255) PRIMARY KEY,
+				action VARCHAR(50) NOT NULL,
+				operator_id VARCHAR(255) NOT NULL,
+				details TEXT NOT NULL,
+				timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+		`,
+	},
+	{
+		ID:   65,
+		Name: "create_treasury_pools_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS treasury_pools (
+				id VARCHAR(100) PRIMARY KEY,
+				name VARCHAR(255) NOT NULL,
+				type VARCHAR(100) NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+			CREATE TABLE IF NOT EXISTS pool_assets (
+				pool_id VARCHAR(100) NOT NULL,
+				asset VARCHAR(50) NOT NULL,
+				balance DECIMAL(36, 18) DEFAULT 0.0 NOT NULL,
+				updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				PRIMARY KEY (pool_id, asset),
+				FOREIGN KEY (pool_id) REFERENCES treasury_pools (id) ON DELETE CASCADE
+			);
+		`,
+	},
+	{
+		ID:   66,
+		Name: "create_treasury_transfers_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS treasury_transfers (
+				id VARCHAR(255) PRIMARY KEY,
+				from_pool VARCHAR(100) NOT NULL,
+				to_pool VARCHAR(100) NOT NULL,
+				asset VARCHAR(50) NOT NULL,
+				amount DECIMAL(36, 18) NOT NULL,
+				status VARCHAR(50) NOT NULL,
+				required_approvals INT NOT NULL,
+				current_approvals INT NOT NULL,
+				risk_score DECIMAL(5, 4) DEFAULT 0.0 NOT NULL,
+				timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_treasury_trans_status ON treasury_transfers (status);
+		`,
+	},
+	{
+		ID:   67,
+		Name: "create_treasury_transfer_approvals_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS treasury_transfer_approvals (
+				id VARCHAR(255) PRIMARY KEY,
+				transfer_id VARCHAR(255) NOT NULL,
+				admin_id VARCHAR(255) NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				FOREIGN KEY (transfer_id) REFERENCES treasury_transfers (id) ON DELETE CASCADE
+			);
+			CREATE INDEX IF NOT EXISTS idx_treasury_app_trans ON treasury_transfer_approvals (transfer_id);
+		`,
+	},
+	{
+		ID:   68,
+		Name: "create_liquidity_records_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS liquidity_records (
+				id VARCHAR(255) PRIMARY KEY,
+				asset VARCHAR(50) NOT NULL,
+				depth_bid DECIMAL(36, 18) NOT NULL,
+				depth_ask DECIMAL(36, 18) NOT NULL,
+				spread DECIMAL(36, 18) NOT NULL,
+				timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_liquidity_rec_asset ON liquidity_records (asset);
+		`,
+	},
+	{
+		ID:   69,
+		Name: "create_reserve_accounts_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS reserve_accounts (
+				id VARCHAR(255) PRIMARY KEY,
+				name VARCHAR(255) NOT NULL,
+				asset VARCHAR(50) NOT NULL,
+				backing_ratio DECIMAL(5, 4) NOT NULL,
+				updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+		`,
+	},
+	{
+		ID:   70,
+		Name: "create_insurance_fund_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS insurance_fund (
+				id VARCHAR(255) PRIMARY KEY,
+				asset VARCHAR(50) NOT NULL,
+				balance DECIMAL(36, 18) NOT NULL,
+				cap_limit DECIMAL(36, 18) NOT NULL,
+				updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+		`,
+	},
+	{
+		ID:   71,
+		Name: "create_reconciliation_results_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS reconciliation_results (
+				id VARCHAR(255) PRIMARY KEY,
+				blockchain_verified BOOLEAN NOT NULL,
+				database_verified BOOLEAN NOT NULL,
+				ledger_verified BOOLEAN NOT NULL,
+				wallet_verified BOOLEAN NOT NULL,
+				transfers_verified BOOLEAN NOT NULL,
+				is_consistent BOOLEAN NOT NULL,
+				details TEXT NOT NULL,
+				timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_reconciliation_res_consistent ON reconciliation_results (is_consistent);
+		`,
+	},
 }
 
 // RunMigrations executes schema migration steps on the pgx connection pool
