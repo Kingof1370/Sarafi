@@ -45,5 +45,33 @@ Records audit events from deposit handlers.
 
 ---
 
-## 4. High Availability Indexes & Foreign Keys
+## 4. Digital Asset Custody Subsystem Tables (Migrations 59 - 64)
+
+### 4.1 custody_vaults
+Stores institutional custody vaults configurations.
+* **Fields:** `id` (PK), `name`, `type`, `is_locked`, `created_at`
+
+### 4.2 vault_assets
+Maintains total asset balances held within each custody vault segment.
+* **Fields:** `vault_id` (PK, FK), `asset` (PK), `balance`, `updated_at`
+
+### 4.3 custody_transfers
+Tracks internal asset transfers requested between vaults.
+* **Fields:** `id` (PK), `from_vault_id` (FK), `to_vault_id` (FK), `asset`, `amount`, `status` (Index), `required_approvals`, `current_approvals`, `timestamp`
+
+### 4.4 custody_transfer_approvals
+Logs multi-party administrative 4-eyes signatures.
+* **Fields:** `id` (PK), `transfer_id` (FK, Index), `admin_id`, `created_at`
+
+### 4.5 custody_audits
+Stores detailed custody audit and operational tracking events.
+* **Fields:** `id` (PK), `vault_id` (Index), `transfer_id`, `asset`, `action`, `amount`, `message`, `timestamp`
+
+### 4.6 custody_emergency_actions
+Logs triggered platform halts and operator locking details.
+* **Fields:** `id` (PK), `action`, `operator_id`, `details`, `timestamp`
+
+---
+
+## 5. High Availability Indexes & Foreign Keys
 Every table features cascading delete foreign keys linking back to `wallets` and `assets_registry` to preserve referential integrity, along with high-selectivity indexes to ensure sub-millisecond query execution times under heavy concurrent load.

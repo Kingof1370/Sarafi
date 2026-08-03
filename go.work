@@ -9,6 +9,7 @@ use (
 	./packages/blockchain
 	./packages/common
 	./packages/connectivity
+	./packages/custody
 	./packages/database
 	./packages/deposits
 	./packages/keys

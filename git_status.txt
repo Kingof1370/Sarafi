@@ -1,0 +1,114 @@
+On branch jules-8620341230820592082-d7982a25
+Changes to be committed:
+  (use "git restore --staged <file>..." to unstage)
+	new file:   .gitignore
+	modified:   apps/backend/main.go
+	modified:   apps/backend/main_test.go
+	modified:   apps/wallet-service/main.go
+	modified:   apps/wallet-service/main_test.go
+	new file:   custody_suite_run.log
+	modified:   docs/API_DOCUMENTATION.md
+	modified:   docs/ARCHITECTURE.md
+	new file:   docs/ASSET_MANAGEMENT.md
+	new file:   docs/ASSET_SECURITY.md
+	new file:   docs/BLOCKCHAIN_ARCHITECTURE.md
+	new file:   docs/BLOCKCHAIN_CONNECTIVITY.md
+	new file:   docs/BLOCKCHAIN_PROCESSING.md
+	new file:   docs/COLD_STORAGE.md
+	new file:   docs/CUSTODY.md
+	modified:   docs/DATABASE_DESIGN.md
+	new file:   docs/DEPOSIT_ENGINE.md
+	new file:   docs/EVENT_ARCHITECTURE.md
+	new file:   docs/HSM_ARCHITECTURE.md
+	new file:   docs/KEY_MANAGEMENT.md
+	new file:   docs/MULTISIGNATURE.md
+	new file:   docs/NODE_MANAGEMENT.md
+	new file:   docs/RPC_ARCHITECTURE.md
+	modified:   docs/SECURITY.md
+	new file:   docs/WALLET_CORE.md
+	new file:   docs/WITHDRAWAL_ENGINE.md
+	new file:   docs/WITHDRAWAL_SECURITY.md
+	modified:   go.work
+	modified:   go.work.sum
+	new file:   packages/address/address.go
+	new file:   packages/address/address_test.go
+	new file:   packages/address/go.mod
+	new file:   packages/assets/assets.go
+	new file:   packages/assets/assets_test.go
+	new file:   packages/assets/go.mod
+	new file:   packages/blockchain/adapter.go
+	new file:   packages/blockchain/blockchain_test.go
+	new file:   packages/blockchain/go.mod
+	new file:   packages/blockchain/hdwallet.go
+	modified:   packages/common/common_test.go
+	new file:   packages/connectivity/connectivity.go
+	new file:   packages/connectivity/connectivity_test.go
+	new file:   packages/connectivity/go.mod
+	modified:   packages/database/migrations.go
+	new file:   packages/deposits/deposits.go
+	new file:   packages/deposits/deposits_test.go
+	new file:   packages/deposits/go.mod
+	new file:   packages/keys/go.mod
+	new file:   packages/keys/keys.go
+	new file:   packages/keys/keys_test.go
+	new file:   packages/ledger-common/go.mod
+	new file:   packages/ledger-common/ledger.go
+	new file:   packages/ledger-common/ledger_test.go
+	modified:   packages/types/types.go
+	new file:   packages/wallet/go.mod
+	new file:   packages/wallet/service.go
+	new file:   packages/wallet/wallet.go
+	new file:   packages/wallet/wallet_test.go
+	new file:   packages/withdrawals/go.mod
+	new file:   packages/withdrawals/withdrawals.go
+	new file:   packages/withdrawals/withdrawals_test.go
+	new file:   reports/P007/BENCHMARK_REPORT.md
+	new file:   reports/P007/BLOCKCHAIN_CONNECTIVITY_BENCHMARK_REPORT.md
+	new file:   reports/P007/BLOCKCHAIN_CONNECTIVITY_DATABASE_REPORT.md
+	new file:   reports/P007/BLOCKCHAIN_CONNECTIVITY_FINAL_REPORT.md
+	new file:   reports/P007/BLOCKCHAIN_CONNECTIVITY_IMPLEMENTATION_REPORT.md
+	new file:   reports/P007/BLOCKCHAIN_CONNECTIVITY_PERFORMANCE_REPORT.md
+	new file:   reports/P007/BLOCKCHAIN_CONNECTIVITY_SECURITY_REPORT.md
+	new file:   reports/P007/BLOCKCHAIN_CONNECTIVITY_TEST_REPORT.md
+	new file:   reports/P007/DATABASE_REPORT.md
+	new file:   reports/P007/DEPOSIT_BENCHMARK_REPORT.md
+	new file:   reports/P007/DEPOSIT_DATABASE_REPORT.md
+	new file:   reports/P007/DEPOSIT_IMPLEMENTATION_REPORT.md
+	new file:   reports/P007/DEPOSIT_PERFORMANCE_REPORT.md
+	new file:   reports/P007/DEPOSIT_SECURITY_REPORT.md
+	new file:   reports/P007/DEPOSIT_TEST_REPORT.md
+	new file:   reports/P007/FINAL_REPORT.md
+	new file:   reports/P007/IMPLEMENTATION_REPORT.md
+	new file:   reports/P007/KEY_MANAGEMENT_BENCHMARK_REPORT.md
+	new file:   reports/P007/KEY_MANAGEMENT_DATABASE_REPORT.md
+	new file:   reports/P007/KEY_MANAGEMENT_FINAL_REPORT.md
+	new file:   reports/P007/KEY_MANAGEMENT_IMPLEMENTATION_REPORT.md
+	new file:   reports/P007/KEY_MANAGEMENT_PERFORMANCE_REPORT.md
+	new file:   reports/P007/KEY_MANAGEMENT_SECURITY_REPORT.md
+	new file:   reports/P007/KEY_MANAGEMENT_TEST_REPORT.md
+	new file:   reports/P007/PERFORMANCE_REPORT.md
+	new file:   reports/P007/SECURITY_REPORT.md
+	new file:   reports/P007/TEST_REPORT.md
+	new file:   reports/P007/WALLET_BENCHMARK_REPORT.md
+	new file:   reports/P007/WALLET_DATABASE_REPORT.md
+	new file:   reports/P007/WALLET_FINAL_REPORT.md
+	new file:   reports/P007/WALLET_IMPLEMENTATION_REPORT.md
+	new file:   reports/P007/WALLET_PERFORMANCE_REPORT.md
+	new file:   reports/P007/WALLET_SECURITY_REPORT.md
+	new file:   reports/P007/WALLET_TEST_REPORT.md
+	new file:   reports/P007/WITHDRAWAL_BENCHMARK_REPORT.md
+	new file:   reports/P007/WITHDRAWAL_DATABASE_REPORT.md
+	new file:   reports/P007/WITHDRAWAL_FINAL_REPORT.md
+	new file:   reports/P007/WITHDRAWAL_IMPLEMENTATION_REPORT.md
+	new file:   reports/P007/WITHDRAWAL_PERFORMANCE_REPORT.md
+	new file:   reports/P007/WITHDRAWAL_SECURITY_REPORT.md
+	new file:   reports/P007/WITHDRAWAL_TEST_REPORT.md
+	new file:   tests/blockchain_connectivity_test.go
+	new file:   tests/deposit_engine_test.go
+	new file:   tests/key_management_test.go
+	new file:   tests/wallet_core_comprehensive_test.go
+	new file:   tests/withdrawal_engine_test.go
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	git_status.txt

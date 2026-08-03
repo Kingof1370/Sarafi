@@ -15,6 +15,7 @@ import (
 	"velyxora/packages/assets"
 	"velyxora/packages/blockchain"
 	"velyxora/packages/connectivity"
+	"velyxora/packages/custody"
 	"velyxora/packages/deposits"
 	"velyxora/packages/keys"
 	"velyxora/packages/withdrawals"
@@ -33,10 +34,14 @@ type PersistentWalletService struct {
 	withdrawalEngine *withdrawals.WithdrawalEngine
 	nodeManager      *connectivity.NodeManager
 	keyManager       *keys.KeyManager
+	custodyMgr       *custody.CustodyManager
 	log              *logger.Logger
 }
 
 func NewPersistentWalletService(db *database.DB, producer *common.KafkaProducer, log *logger.Logger) *PersistentWalletService {
+	if log == nil {
+		log = logger.NewLogger(logger.Config{Level: "INFO", Format: "TEXT", ServiceName: "wallet-service"})
+	}
 	return &PersistentWalletService{
 		db:               db,
 		producer:         producer,
@@ -48,6 +53,7 @@ func NewPersistentWalletService(db *database.DB, producer *common.KafkaProducer,
 		withdrawalEngine: withdrawals.NewWithdrawalEngine(),
 		nodeManager:      connectivity.NewNodeManager(),
 		keyManager:       keys.NewKeyManager(nil),
+		custodyMgr:       custody.NewCustodyManager(),
 		log:              log,
 	}
 }
@@ -120,6 +126,28 @@ func (p *PersistentWalletService) Bootstrap(ctx context.Context) error {
 		}
 	}
 
+	// 3.5. Register Standard Institutional Custody Vaults
+	if p.db != nil {
+		defaultVaults := []struct {
+			ID   string
+			Name string
+			Type string
+		}{
+			{"v_hot", "Hot Exchange Vault", "HOT"},
+			{"v_warm", "Warm Operational Vault", "WARM"},
+			{"v_cold", "Cold Core Storage", "COLD"},
+			{"v_deep_cold", "Deep Cold Air-Gapped Vault", "DEEP_COLD"},
+			{"v_treasury", "Corporate Treasury Vault", "TREASURY_VAULT"},
+			{"v_reserve", "Platform Emergency Reserve", "RESERVE_VAULT"},
+			{"v_recovery", "Disaster Recovery Vault", "RECOVERY_VAULT"},
+		}
+		for _, v := range defaultVaults {
+			_, _ = p.db.Pool.Exec(ctx,
+				"INSERT INTO custody_vaults (id, name, type, is_locked) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING",
+				v.ID, v.Name, v.Type, false)
+		}
+	}
+
 	// 4. Load existing wallets from Database if available
 	if p.db != nil {
 		rows, err := p.db.Pool.Query(ctx, "SELECT id, user_id, type, is_locked FROM wallets")
@@ -178,6 +206,11 @@ func (p *PersistentWalletService) GetNodeManager() *connectivity.NodeManager {
 // GetKeyManager retrieves the internal KeyManager
 func (p *PersistentWalletService) GetKeyManager() *keys.KeyManager {
 	return p.keyManager
+}
+
+// GetCustodyManager retrieves the internal CustodyManager
+func (p *PersistentWalletService) GetCustodyManager() *custody.CustodyManager {
+	return p.custodyMgr
 }
 
 // ProvisionWallet handles both DB persistence, state allocation, and Kafka notifications
