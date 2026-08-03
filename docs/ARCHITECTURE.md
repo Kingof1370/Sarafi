@@ -31,7 +31,9 @@ Velyxora is an autonomous, high-throughput, low-latency, and ultra-secure crypto
 ## 2. Shared Library Core Architecture
 * **`packages/blockchain`:** Unified adapters for BTC, ETH, BSC, Polygon, Solana, Avalanche, Tron, and Litecoin. Handles address allocations, key derivation, and signature verifications.
 * **`packages/wallet`:** Manages multi-dimensional Available/Locked/Reserved/Pending/Total balances, daily operational spending limits, and Treasury administrative stage workflows.
-* **`packages/custody`:** Orchestrates institutional digital asset custody segments (Hot, Warm, Cold, Deep Cold, Treasury, Reserve, Recovery vaults) with 4-eyes multi-signature approval pipelines and secure system-wide emergency freeze flags.
+* **`packages/custody`:** Orchestrates institutional custody vaults with 4-eyes approvals and global freeze toggles.
+* **`packages/treasury`:** Manages corporate pools, allowed transfer matrices, dual approval thresholds, and automated reconciliations.
+* **`packages/monitoring`:** Governs real-time health checks, IP and geodistance risk fraud analysis, security alerts, auto-escalations, and service auto-healers.
 * **`packages/assets`:** Manages asset configs and deposit/withdrawal/trade limit permissions.
 * **`packages/address`:** Handles address registry lookup, allocation, and cryptographic signature verification.
 * **`packages/ledger-common`:** Secure chained hash auditing validation.

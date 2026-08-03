@@ -112,7 +112,8 @@ func TestAddressRegistryAndOwnership(t *testing.T) {
 	blockchainReg := blockchain.NewAdapterRegistry()
 	ethAdapter, _ := blockchainReg.Get("Ethereum")
 
-	privKey := []byte("deterministic-private-key-phrase")
+	privKey := make([]byte, 32)
+	copy(privKey, []byte("deterministic-private-key-phrase"))
 	pubKey := ethAdapter.DerivePublicKey(privKey)
 	addressString, _ := ethAdapter.GenerateAddress(privKey)
 

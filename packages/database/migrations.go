@@ -1147,6 +1147,85 @@ var schemaMigrations = []Migration{
 			CREATE INDEX IF NOT EXISTS idx_reconciliation_res_consistent ON reconciliation_results (is_consistent);
 		`,
 	},
+	{
+		ID:   72,
+		Name: "create_incidents_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS incidents (
+				id VARCHAR(255) PRIMARY KEY,
+				title VARCHAR(255) NOT NULL,
+				severity VARCHAR(50) NOT NULL,
+				status VARCHAR(50) NOT NULL,
+				details TEXT NOT NULL,
+				timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_incidents_status ON incidents (status);
+		`,
+	},
+	{
+		ID:   73,
+		Name: "create_alerts_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS alerts (
+				id VARCHAR(255) PRIMARY KEY,
+				source VARCHAR(255) NOT NULL,
+				message TEXT NOT NULL,
+				severity VARCHAR(50) NOT NULL,
+				timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_alerts_severity ON alerts (severity);
+		`,
+	},
+	{
+		ID:   74,
+		Name: "create_fraud_events_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS fraud_events (
+				id VARCHAR(255) PRIMARY KEY,
+				user_id VARCHAR(255) NOT NULL,
+				action_type VARCHAR(100) NOT NULL,
+				risk_score DECIMAL(5, 4) NOT NULL,
+				details TEXT NOT NULL,
+				timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_fraud_user ON fraud_events (user_id);
+		`,
+	},
+	{
+		ID:   75,
+		Name: "create_recovery_events_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS recovery_events (
+				id VARCHAR(255) PRIMARY KEY,
+				component VARCHAR(255) NOT NULL,
+				details TEXT NOT NULL,
+				timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+		`,
+	},
+	{
+		ID:   76,
+		Name: "create_monitoring_metrics_records_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS monitoring_metrics_records (
+				id VARCHAR(255) PRIMARY KEY,
+				metric_name VARCHAR(255) NOT NULL,
+				metric_value DECIMAL(36, 18) NOT NULL,
+				timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+		`,
+	},
+	{
+		ID:   77,
+		Name: "create_health_status_records_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS health_status_records (
+				component VARCHAR(255) PRIMARY KEY,
+				status VARCHAR(100) NOT NULL,
+				updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+		`,
+	},
 }
 
 // RunMigrations executes schema migration steps on the pgx connection pool

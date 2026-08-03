@@ -73,5 +73,69 @@ Logs triggered platform halts and operator locking details.
 
 ---
 
-## 5. High Availability Indexes & Foreign Keys
-Every table features cascading delete foreign keys linking back to `wallets` and `assets_registry` to preserve referential integrity, along with high-selectivity indexes to ensure sub-millisecond query execution times under heavy concurrent load.
+## 5. Treasury & Reconciliation Tables (Migrations 65 - 71)
+
+### 5.1 treasury_pools
+Maintains configurations for exchange-owned pools.
+* **Fields:** `id` (PK), `name`, `type`, `created_at`
+
+### 5.2 pool_assets
+Stores asset capital holdings allocated within each pool.
+* **Fields:** `pool_id` (PK, FK), `asset` (PK), `balance`, `updated_at`
+
+### 5.3 treasury_transfers
+Logs requested, approved, and completed pool capital movements.
+* **Fields:** `id` (PK), `from_pool`, `to_pool`, `asset`, `amount`, `status` (Index), `required_approvals`, `current_approvals`, `risk_score`, `timestamp`
+
+### 5.4 treasury_transfer_approvals
+Logs administrative approvals.
+* **Fields:** `id` (PK), `transfer_id` (FK, Index), `admin_id`, `created_at`
+
+### 5.5 liquidity_records
+Saves snapshot metrics of order book bids/asks and spreads.
+* **Fields:** `id` (PK), `asset` (Index), `depth_bid`, `depth_ask`, `spread`, `timestamp`
+
+### 5.6 reserve_accounts
+Logs capital backing details for exchange backing accounts.
+* **Fields:** `id` (PK), `name`, `asset`, `backing_ratio`, `updated_at`
+
+### 5.7 insurance_fund
+Tracks margins and caps of insolvency buffers.
+* **Fields:** `id` (PK), `asset`, `balance`, `cap_limit`, `updated_at`
+
+### 5.8 reconciliation_results
+Saves outputs from automatic five-layered reconciliation runs.
+* **Fields:** `id` (PK), `blockchain_verified`, `database_verified`, `ledger_verified`, `wallet_verified`, `transfers_verified`, `is_consistent` (Index), `details`, `timestamp`
+
+---
+
+## 6. Enterprise Monitoring & Incident Response Tables (Migrations 72 - 77)
+
+### 6.1 incidents
+Logs system incident creations and severe escalations.
+* **Fields:** `id` (PK), `title`, `severity`, `status` (Index), `details`, `timestamp`
+
+### 6.2 alerts
+Records security and environmental warnings.
+* **Fields:** `id` (PK), `source`, `message`, `severity` (Index), `timestamp`
+
+### 6.3 fraud_events
+Logs flagged anomalous deposits or withdrawals.
+* **Fields:** `id` (PK), `user_id` (Index), `action_type`, `risk_score`, `details`, `timestamp`
+
+### 6.4 recovery_events
+Logs automated service recoveries and healing sequences.
+* **Fields:** `id` (PK), `component`, `details`, `timestamp`
+
+### 6.5 monitoring_metrics_records
+Stores historical component operational values.
+* **Fields:** `id` (PK), `metric_name`, `metric_value`, `timestamp`
+
+### 6.6 health_status_records
+Logs current operational statuses of components.
+* **Fields:** `component` (PK), `status`, `updated_at`
+
+---
+
+## 7. High Availability Indexes & Foreign Keys
+Every table features cascading delete foreign keys linking back to parent registries to preserve referential integrity, along with high-selectivity indexes to ensure sub-millisecond query execution times under heavy concurrent load.

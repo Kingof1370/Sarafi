@@ -82,164 +82,11 @@ All private REST routes require a valid JWT passed in the standard Authorization
 }
 ```
 
-### 2.4 List Generated Addresses
-* **Route:** `GET /api/v1/wallet/addresses`
-* **Access:** Private (Authenticated)
-* **Response Output:**
-```json
-{
-  "addresses": [
-    {
-      "address": "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2",
-      "network": "Bitcoin",
-      "status": "ALLOCATED",
-      "derivation_path": "m/44'/0'/0'/0/0",
-      "created_at": "2026-08-02T12:00:00Z"
-    }
-  ]
-}
-```
-
-### 2.5 Get Detailed Balance Breakdowns
-* **Route:** `GET /api/v1/wallet/balances/details`
-* **Access:** Private (Authenticated)
-* **Response Output:**
-```json
-{
-  "balances_details": [
-    {
-      "wallet_id": "wal_hot_usr_mock_123",
-      "asset": "BTC",
-      "available": 1.25,
-      "locked": 0.1,
-      "reserved": 0.0,
-      "pending": 0.0,
-      "total": 1.35,
-      "updated_at": "2026-08-02T12:00:00Z"
-    }
-  ]
-}
-```
-
-### 2.6 Get Wallet Audits / History
-* **Route:** `GET /api/v1/wallet/history`
-* **Access:** Private (Authenticated)
-* **Response Output:**
-```json
-{
-  "history": [
-    {
-      "id": "audit_111",
-      "wallet_id": "wal_hot_usr_mock_123",
-      "asset": "BTC",
-      "action": "BALANCE_ADJUSTED",
-      "amount": 1.5,
-      "prev_balance": 0.0,
-      "new_balance": 1.5,
-      "message": "Onboarding bonus credit",
-      "timestamp": "2026-08-02T11:00:00Z"
-    }
-  ]
-}
-```
-
 ---
 
-## 3. Deposit Engine Subsystem APIs
+## 3. Digital Asset Custody REST APIs
 
-### 3.1 Get Deposit History
-* **Route:** `GET /api/v1/wallet/deposits/history`
-* **Access:** Private (Authenticated)
-* **Response Output:**
-```json
-{
-  "deposits": [
-    {
-      "id": "dep_mock_111",
-      "user_id": "usr_123",
-      "asset": "BTC",
-      "amount": 0.15,
-      "fee": 0.0,
-      "address": "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2",
-      "tx_hash": "0x123abc456def7890_btc",
-      "confirmations": 6,
-      "status": "COMPLETED",
-      "created_at": "2026-08-02T10:00:00Z",
-      "updated_at": "2026-08-02T11:00:00Z"
-    }
-  ]
-}
-```
-
-### 3.2 Get Deposit Status
-* **Route:** `GET /api/v1/wallet/deposits/status/:id`
-* **Access:** Private (Authenticated)
-* **Response Output:**
-```json
-{
-  "id": "dep_mock_111",
-  "status": "COMPLETED",
-  "confirmations": 6
-}
-```
-
-### 3.3 Get Deposit Details
-* **Route:** `GET /api/v1/wallet/deposits/details/:id`
-* **Access:** Private (Authenticated)
-* **Response Output:**
-```json
-{
-  "id": "dep_mock_111",
-  "user_id": "usr_123",
-  "asset": "BTC",
-  "amount": 0.15,
-  "fee": 0.0,
-  "address": "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2",
-  "tx_hash": "0x123abc456def7890_btc",
-  "confirmations": 6,
-  "status": "COMPLETED",
-  "created_at": "2026-08-02T10:00:00Z",
-  "updated_at": "2026-08-02T11:00:00Z"
-}
-```
-
-### 3.4 Lookup Blockchain Transaction
-* **Route:** `GET /api/v1/wallet/deposits/tx/:tx_hash`
-* **Access:** Private (Authenticated)
-* **Response Output:**
-```json
-{
-  "tx_hash": "0x123abc456def7890_btc",
-  "network": "Bitcoin",
-  "asset": "BTC",
-  "amount": 0.15,
-  "sender": "1SenderAddr_111",
-  "receiver": "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2",
-  "block_number": 750431,
-  "gas_used": 0,
-  "timestamp": "2026-08-02T10:00:00Z"
-}
-```
-
-### 3.5 Get Confirmation Status
-* **Route:** `GET /api/v1/wallet/deposits/confirmations/:id`
-* **Access:** Private (Authenticated)
-* **Response Output:**
-```json
-{
-  "deposit_id": "dep_mock_111",
-  "confirmations_count": 6,
-  "required_confirmations": 6,
-  "status": "COMPLETED",
-  "updated_at": "2026-08-02T11:00:00Z"
-}
-```
-
----
-
-## 4. Digital Asset Custody REST APIs
-
-### 4.1 Get Custody Total Value Overview
+### 3.1 Get Custody Total Value Overview
 * **Route:** `GET /api/v1/wallet/custody/overview`
 * **Access:** Private (Authenticated Administrator)
 * **Response Output:**
@@ -251,7 +98,7 @@ All private REST routes require a valid JWT passed in the standard Authorization
 }
 ```
 
-### 4.2 List Institutional Custody Vaults
+### 3.2 List Institutional Custody Vaults
 * **Route:** `GET /api/v1/wallet/custody/vaults`
 * **Access:** Private (Authenticated Administrator)
 * **Response Output:**
@@ -265,79 +112,121 @@ All private REST routes require a valid JWT passed in the standard Authorization
 }
 ```
 
-### 4.3 Request Custody Asset Transfer
-* **Route:** `POST /api/v1/wallet/custody/transfer`
+---
+
+## 4. Institutional Treasury REST APIs
+
+### 4.1 Get Treasury Overview
+* **Route:** `GET /api/v1/wallet/treasury/overview`
 * **Access:** Private (Authenticated Administrator)
-* **Payload:**
-```json
-{
-  "from_vault_id": "v_cold",
-  "to_vault_id": "v_hot",
-  "asset": "BTC",
-  "amount": 150.0
-}
-```
 * **Response Output:**
 ```json
 {
-  "message": "Custody transfer request submitted, pending administrative approvals",
-  "transfer_id": "cust_tx_1690934400000000_BTC",
-  "status": "REQUESTED"
+  "total_treasury_value_usdt": 12500500.75,
+  "status": "OPTIMAL"
 }
 ```
 
-### 4.4 Approve Custody Asset Transfer (4-Eyes Workflow)
-* **Route:** `POST /api/v1/wallet/custody/approve/:id`
+### 4.2 List Internal Transfers History
+* **Route:** `GET /api/v1/wallet/treasury/history`
 * **Access:** Private (Authenticated Administrator)
 * **Response Output:**
 ```json
 {
-  "message": "Custody transfer approval registered successfully",
-  "transfer_id": "cust_tx_1690934400000000_BTC",
-  "status": "COMPLETED"
-}
-```
-
-### 4.5 Get Asset Distribution across Vaults
-* **Route:** `GET /api/v1/wallet/custody/distribution`
-* **Access:** Private (Authenticated Administrator)
-* **Response Output:**
-```json
-{
-  "distribution": [
-    {"type": "HOT", "total_btc": 250.0},
-    {"type": "COLD", "total_btc": 2250.50}
+  "transfers": [
+    {"id": "tx_int_111", "from_pool": "TREASURY", "to_pool": "HOT", "asset": "BTC", "amount": 10.0, "status": "COMPLETED", "timestamp": "2026-08-03T01:00:00Z"}
   ]
 }
 ```
 
-### 4.6 Get Custody Audit Logs
-* **Route:** `GET /api/v1/wallet/custody/audit`
+---
+
+## 5. Enterprise Monitoring, Fraud & Incident Response REST APIs
+
+### 5.1 Get Component Health Statuses
+* **Route:** `GET /api/v1/wallet/monitoring/health`
 * **Access:** Private (Authenticated Administrator)
 * **Response Output:**
 ```json
 {
-  "custody_audits": [
+  "health_status": [
+    {"component": "DATABASE", "status": "HEALTHY", "updated_at": "2026-08-03T02:00:00Z"},
+    {"component": "KAFKA", "status": "HEALTHY", "updated_at": "2026-08-03T02:00:00Z"},
+    {"component": "WALLET_CORE", "status": "HEALTHY", "updated_at": "2026-08-03T02:00:00Z"}
+  ]
+}
+```
+
+### 5.2 List Flagged Fraud Events
+* **Route:** `GET /api/v1/wallet/monitoring/fraud`
+* **Access:** Private (Authenticated Security Administrator)
+* **Response Output:**
+```json
+{
+  "fraud_events": [
     {
-      "id": "aud_cust_1",
-      "vault_id": "v_cold",
-      "action": "DEPOSIT",
-      "amount": 500.0,
-      "message": "Initial reserve deposit",
-      "timestamp": "2026-08-02T10:00:00Z"
+      "id": "frd_111",
+      "user_id": "usr_99",
+      "action_type": "WITHDRAWAL",
+      "risk_score": 0.85,
+      "details": "High risk geodistance travelling anomaly",
+      "timestamp": "2026-08-03T03:00:00Z"
     }
   ]
 }
 ```
 
-### 4.7 Execute System-Wide Emergency Action
-* **Route:** `POST /api/v1/wallet/custody/emergency/:action`
-* **Access:** Private (Authenticated Emergency Operator)
+### 5.3 Get System Incident List
+* **Route:** `GET /api/v1/wallet/monitoring/incidents`
+* **Access:** Private (Authenticated Security Administrator)
 * **Response Output:**
 ```json
 {
-  "message": "Emergency action executed successfully",
-  "action": "FREEZE",
-  "status": "LOCKED"
+  "incidents": [
+    {
+      "id": "inc_111",
+      "title": "Database degradation alert",
+      "severity": "HIGH",
+      "status": "RESOLVED",
+      "details": "High latencies matched completely with DB lock queues",
+      "timestamp": "2026-08-03T03:00:00Z"
+    }
+  ]
+}
+```
+
+### 5.4 Get Operational Recovery History
+* **Route:** `GET /api/v1/wallet/monitoring/recovery`
+* **Access:** Private (Authenticated Administrator)
+* **Response Output:**
+```json
+{
+  "recovery_history": [
+    {
+      "id": "rec_111",
+      "component": "DATABASE",
+      "details": "Connection pool successfully refreshed and restored",
+      "timestamp": "2026-08-03T03:30:00Z"
+    }
+  ]
+}
+```
+
+### 5.5 Trigger Service Self-Healing Manual Recovery
+* **Route:** `POST /api/v1/wallet/monitoring/recovery/trigger`
+* **Access:** Private (Authenticated Administrator)
+* **Payload:**
+```json
+{
+  "component": "DATABASE"
+}
+```
+* **Response Output:**
+```json
+{
+  "message": "Automated service self-healing triggered successfully",
+  "id": "rec_111",
+  "component": "DATABASE",
+  "status": "HEALTHY"
 }
 ```
