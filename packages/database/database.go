@@ -10,7 +10,21 @@ import (
 
 // DB represents a connection pool wrapper for PostgreSQL
 type DB struct {
-	Pool *pgxpool.Pool
+	Pool     *pgxpool.Pool
+	ReadPool *pgxpool.Pool // Read Replica connection pool
+}
+
+// GetWritePool returns the primary writer pool
+func (db *DB) GetWritePool() *pgxpool.Pool {
+	return db.Pool
+}
+
+// GetReadPool returns the read replica pool (falling back to primary writer if nil)
+func (db *DB) GetReadPool() *pgxpool.Pool {
+	if db.ReadPool != nil {
+		return db.ReadPool
+	}
+	return db.Pool
 }
 
 // Config defines connection variables for PostgreSQL

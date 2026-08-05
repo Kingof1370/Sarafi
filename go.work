@@ -11,6 +11,7 @@ use (
 	./packages/connectivity
 	./packages/custody
 	./packages/database
+	./packages/ha
 	./packages/monitoring
 	./packages/treasury
 	./packages/deposits
