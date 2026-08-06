@@ -97,11 +97,8 @@ func main() {
 	log.Info("Kafka Producer registered.")
 
 	// Instantiate and Bootstrap Persistent Wallet Service Core in the Gateway as well!
-	var pws *wallet.PersistentWalletService
-	if db != nil {
-		pws = wallet.NewPersistentWalletService(db, kafkaProducer, log)
-		_ = pws.Bootstrap(context.Background())
-	}
+	pws := wallet.NewPersistentWalletService(db, kafkaProducer, log)
+	_ = pws.Bootstrap(context.Background())
 
 	// 6. Setup Rate Limiter
 	limiter := common.NewRateLimiter(100, time.Minute)
@@ -204,6 +201,46 @@ func main() {
 	r.GET("/metrics", func(c *gin.Context) {
 		c.String(http.StatusOK, "# HELP velyxora_api_gateway_uptime Gateway uptime counter\n# TYPE velyxora_api_gateway_uptime counter\nvelyxora_api_gateway_uptime 1.0\n")
 	})
+
+	// Observability, Incident Response & Operations Endpoints
+	monGroup := r.Group("/monitoring")
+	{
+		monGroup.GET("/health", func(c *gin.Context) {
+			h := pws.GetMonitoringService().GetSystemHealth()
+			c.JSON(http.StatusOK, h)
+		})
+
+		monGroup.GET("/incidents", func(c *gin.Context) {
+			inc := pws.GetMonitoringService().ListIncidents()
+			c.JSON(http.StatusOK, gin.H{"incidents": inc})
+		})
+
+		monGroup.GET("/fraud", func(c *gin.Context) {
+			fr := pws.GetMonitoringService().ListFraudAlerts()
+			c.JSON(http.StatusOK, gin.H{"fraud_events": fr})
+		})
+
+		monGroup.GET("/recovery", func(c *gin.Context) {
+			rec := pws.GetMonitoringService().ListRecoveryHistory()
+			c.JSON(http.StatusOK, gin.H{"recovery_history": rec})
+		})
+
+		monGroup.POST("/recovery/trigger", func(c *gin.Context) {
+			var req struct {
+				Component string `json:"component" binding:"required"`
+			}
+			if err := c.ShouldBindJSON(&req); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+			success, err := pws.GetMonitoringService().TriggerOperationalRecovery(c.Request.Context(), req.Component)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{"success": success, "component": req.Component, "status": "HEALTHY"})
+		})
+	}
 
 	// Real-time Gateway WebSocket Core
 	r.GET("/ws", wsGateway.HandleConnection)

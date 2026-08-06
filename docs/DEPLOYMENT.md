@@ -24,12 +24,6 @@ Deploy the API Gateway, Matching Engine, Wallet Service, and Frontend interface:
 kubectl apply -f infrastructure/kubernetes/
 ```
 
-### Apply High Availability & Auto-Scaling Rules
-Deploy Horizontal Pod Autoscalers (HPA) and Pod Disruption Budgets (PDB):
-```bash
-kubectl apply -f infrastructure/kubernetes/ha-scaling.yaml
-```
-
 ### Helm Charts
 Alternatively, you can package and deploy via Helm:
 ```bash

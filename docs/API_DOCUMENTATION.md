@@ -341,3 +341,93 @@ All private REST routes require a valid JWT passed in the standard Authorization
   "status": "LOCKED"
 }
 ```
+
+---
+
+## 5. Operations & Production Observability REST APIs
+
+### 5.1 Get Subsystems Health Status
+* **Route:** `GET /monitoring/health`
+* **Access:** Private (Authenticated Operator)
+* **Response Output:**
+```json
+{
+  "API_GATEWAY": "HEALTHY",
+  "BLOCKCHAIN_BAL": "HEALTHY",
+  "CUSTODY_VAULTS": "HEALTHY",
+  "DATABASE": "HEALTHY",
+  "KAFKA": "HEALTHY",
+  "REDIS": "HEALTHY",
+  "TREASURY_POOLS": "HEALTHY",
+  "WALLET_CORE": "HEALTHY"
+}
+```
+
+### 5.2 List Active System Incidents
+* **Route:** `GET /monitoring/incidents`
+* **Access:** Private (Authenticated Operator)
+* **Response Output:**
+```json
+{
+  "incidents": [
+    {
+      "id": "inc_1690934400000",
+      "title": "AUTOMATED EMERGENCY ESCALATION",
+      "severity": "CRITICAL",
+      "status": "OPEN",
+      "details": "DATABASE microservice failure detected!",
+      "timestamp": "2026-08-02T12:00:00Z"
+    }
+  ]
+}
+```
+
+### 5.3 List Flagged Fraud Alerts
+* **Route:** `GET /monitoring/fraud`
+* **Access:** Private (Authenticated Operator / Auditor)
+* **Response Output:**
+```json
+{
+  "fraud_events": [
+    {
+      "id": "frd_1690934400000",
+      "user_id": "usr_fraudster",
+      "action_type": "WITHDRAWAL",
+      "risk_score": 0.95,
+      "details": "Anomalously large volume detected. Blacklisted network IP pool detected.",
+      "timestamp": "2026-08-02T12:05:00Z"
+    }
+  ]
+}
+```
+
+### 5.4 Get Historical Healing Recovery Logs
+* **Route:** `GET /monitoring/recovery`
+* **Access:** Private (Authenticated Operator)
+* **Response Output:**
+```json
+{
+  "recovery_history": [
+    "[2026-08-02T12:00:10Z] INITIATING RECOVERY: component DATABASE",
+    "[2026-08-02T12:00:15Z] RECOVERY SUCCESSFUL: component DATABASE health restored"
+  ]
+}
+```
+
+### 5.5 Dispatch Self-Healing Recovery Action
+* **Route:** `POST /monitoring/recovery/trigger`
+* **Access:** Private (Authenticated Operator)
+* **Payload:**
+```json
+{
+  "component": "DATABASE"
+}
+```
+* **Response Output:**
+```json
+{
+  "success": true,
+  "component": "DATABASE",
+  "status": "HEALTHY"
+}
+```

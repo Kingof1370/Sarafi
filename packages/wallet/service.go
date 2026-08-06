@@ -19,6 +19,7 @@ import (
 	"velyxora/packages/deposits"
 	"velyxora/packages/treasury"
 	"velyxora/packages/keys"
+	"velyxora/packages/monitoring"
 	"velyxora/packages/withdrawals"
 )
 
@@ -37,6 +38,7 @@ type PersistentWalletService struct {
 	keyManager       *keys.KeyManager
 	custodyMgr       *custody.CustodyManager
 	treasuryMgr      *treasury.TreasuryManager
+	monitoringService *monitoring.MonitoringService
 	log              *logger.Logger
 }
 
@@ -57,8 +59,14 @@ func NewPersistentWalletService(db *database.DB, producer *common.KafkaProducer,
 		keyManager:       keys.NewKeyManager(nil),
 		custodyMgr:       custody.NewCustodyManager(),
 		treasuryMgr:      treasury.NewTreasuryManager(),
+		monitoringService: monitoring.NewMonitoringService(),
 		log:              log,
 	}
+}
+
+// GetMonitoringService retrieves the internal MonitoringService
+func (p *PersistentWalletService) GetMonitoringService() *monitoring.MonitoringService {
+	return p.monitoringService
 }
 
 // Bootstrap loads initial assets and synchronizes wallets from PostgreSQL

@@ -117,3 +117,18 @@ Dedicated Kafka topics:
 ## 7. Logging & Monitoring
 * **Logging:** Emits slog structured JSON audits containing trace IDs, latencies, and service parameters.
 * **Monitoring:** Exposes `/metrics` Prometheus counters tracking available memory usage, CPU load, and goroutine leak metrics.
+
+---
+
+## 8. Production Observability & Operational Incident Response
+Velyxora implements an advanced supervisor platform and operations cockpit to achieve 99.999% uptime and auto-healing capabilities.
+* **Components Health Status:** Centralized telemetry engine tracks real-time status (`HEALTHY`, `DEGRADED`, `UNHEALTHY`) of core subsystems (Postgres, Redis, Kafka, Wallet Core, Custody, Treasury, Node connectivity).
+* **Automated Emergency Escalations:** If critical components (Database, Kafka) go unhealthy, the supervisor instantly opens a Critical System Incident and generates severe security alerts.
+* **Transaction Fraud Engine:** Real-time scoring analyzes geo-distances, impossible travel speed, and blacklisted network IP profiles. Any score $\ge 0.7$ automatically blocks the transaction and triggers immediate security notifications.
+* **Operational Self-Healing Recovery:** Exposes automatic recovery mechanics to let human operators or automated kubernetes scripts trigger healing procedures, restoring unhealthy components to default active operations securely.
+* **Observability API Cockpit:** Exposes production-ready HTTP REST endpoints:
+  - `GET /monitoring/health` — Subsystem health metrics mapping.
+  - `GET /monitoring/incidents` — Live system incident queues.
+  - `GET /monitoring/fraud` — Flagged transaction security alerts.
+  - `GET /monitoring/recovery` — Historical self-healing event traces.
+  - `POST /monitoring/recovery/trigger` — Dispatches automated node recovery routines.

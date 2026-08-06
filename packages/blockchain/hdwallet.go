@@ -1,7 +1,6 @@
 package blockchain
 
 import (
-	"crypto/elliptic"
 	"crypto/hmac"
 	"crypto/sha512"
 	"encoding/binary"
@@ -10,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/tyler-smith/go-bip39"
 )
 
@@ -155,18 +155,8 @@ func (k *Key) DerivePath(path string) (*Key, error) {
 	return current, nil
 }
 
-// GetPubKeyFromPriv derives uncompressed P256 public key (65 bytes) deterministically
+// GetPubKeyFromPriv derives uncompressed secp256k1 public key (65 bytes) deterministically
 func GetPubKeyFromPriv(priv []byte) []byte {
-	curve := elliptic.P256()
-	x, y := curve.ScalarBaseMult(priv)
-	pub := make([]byte, 65)
-	pub[0] = 0x04
-
-	xb := x.Bytes()
-	yb := y.Bytes()
-
-	// Ensure exact padding for 32-byte coordinates
-	copy(pub[33-len(xb):33], xb)
-	copy(pub[65-len(yb):65], yb)
-	return pub
+	_, pubKey := btcec.PrivKeyFromBytes(priv)
+	return pubKey.SerializeUncompressed()
 }

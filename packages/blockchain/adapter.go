@@ -1,10 +1,7 @@
 package blockchain
 
 import (
-	"crypto/ecdsa"
 	"crypto/ed25519"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -13,6 +10,8 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
 	"golang.org/x/crypto/ripemd160"
 )
 
@@ -100,38 +99,22 @@ func (b *BTCAdapter) SignTransaction(privateKey []byte, txData []byte) ([]byte, 
 		return nil, errors.New("invalid private key length")
 	}
 	hash := sha256.Sum256(txData)
-	privKey := new(ecdsa.PrivateKey)
-	privKey.PublicKey.Curve = elliptic.P256()
-	privKey.D = new(big.Int).SetBytes(privateKey)
-	privKey.PublicKey.X, privKey.PublicKey.Y = privKey.PublicKey.Curve.ScalarBaseMult(privateKey)
-
-	r, s, err := ecdsa.Sign(rand.Reader, privKey, hash[:])
-	if err != nil {
-		return nil, err
-	}
-	signature := append(r.Bytes(), s.Bytes()...)
-	return signature, nil
+	privKey, _ := btcec.PrivKeyFromBytes(privateKey)
+	sig := ecdsa.Sign(privKey, hash[:])
+	return sig.Serialize(), nil
 }
 
 func (b *BTCAdapter) VerifySignature(publicKey []byte, txData []byte, signature []byte) (bool, error) {
-	if len(signature) < 64 {
-		return false, errors.New("invalid signature length")
-	}
 	hash := sha256.Sum256(txData)
-	r := new(big.Int).SetBytes(signature[:32])
-	s := new(big.Int).SetBytes(signature[32:])
-
-	pubKey := new(ecdsa.PublicKey)
-	pubKey.Curve = elliptic.P256()
-
-	if len(publicKey) == 65 && publicKey[0] == 0x04 {
-		pubKey.X = new(big.Int).SetBytes(publicKey[1:33])
-		pubKey.Y = new(big.Int).SetBytes(publicKey[33:65])
-	} else {
-		return false, errors.New("unsupported public key format for ECDSA")
+	pubKey, err := btcec.ParsePubKey(publicKey)
+	if err != nil {
+		return false, err
 	}
-
-	return ecdsa.Verify(pubKey, hash[:], r, s), nil
+	sig, err := ecdsa.ParseSignature(signature)
+	if err != nil {
+		return false, err
+	}
+	return sig.Verify(hash[:], pubKey), nil
 }
 
 // EVMAdapter is the core engine for all EVM compatible blockchains (Ethereum, BNB, Polygon, Avalanche)
@@ -161,36 +144,22 @@ func (e *EVMAdapter) GenerateAddress(privateKey []byte) (string, error) {
 
 func (e *EVMAdapter) SignTransaction(privateKey []byte, txData []byte) ([]byte, error) {
 	hash := sha256.Sum256(txData)
-	privKey := new(ecdsa.PrivateKey)
-	privKey.PublicKey.Curve = elliptic.P256()
-	privKey.D = new(big.Int).SetBytes(privateKey)
-	privKey.PublicKey.X, privKey.PublicKey.Y = privKey.PublicKey.Curve.ScalarBaseMult(privateKey)
-
-	r, s, err := ecdsa.Sign(rand.Reader, privKey, hash[:])
-	if err != nil {
-		return nil, err
-	}
-	return append(r.Bytes(), s.Bytes()...), nil
+	privKey, _ := btcec.PrivKeyFromBytes(privateKey)
+	sig := ecdsa.Sign(privKey, hash[:])
+	return sig.Serialize(), nil
 }
 
 func (e *EVMAdapter) VerifySignature(publicKey []byte, txData []byte, signature []byte) (bool, error) {
-	if len(signature) < 64 {
-		return false, nil
-	}
 	hash := sha256.Sum256(txData)
-	r := new(big.Int).SetBytes(signature[:32])
-	s := new(big.Int).SetBytes(signature[32:])
-
-	pubKey := new(ecdsa.PublicKey)
-	pubKey.Curve = elliptic.P256()
-	if len(publicKey) == 65 && publicKey[0] == 0x04 {
-		pubKey.X = new(big.Int).SetBytes(publicKey[1:33])
-		pubKey.Y = new(big.Int).SetBytes(publicKey[33:65])
-	} else {
-		return false, nil
+	pubKey, err := btcec.ParsePubKey(publicKey)
+	if err != nil {
+		return false, err
 	}
-
-	return ecdsa.Verify(pubKey, hash[:], r, s), nil
+	sig, err := ecdsa.ParseSignature(signature)
+	if err != nil {
+		return false, err
+	}
+	return sig.Verify(hash[:], pubKey), nil
 }
 
 // SOLAdapter implements Solana's Ed25519 signature algorithm and Base58 address structure
@@ -261,35 +230,22 @@ func (t *TronAdapter) GenerateAddress(privateKey []byte) (string, error) {
 
 func (t *TronAdapter) SignTransaction(privateKey []byte, txData []byte) ([]byte, error) {
 	hash := sha256.Sum256(txData)
-	privKey := new(ecdsa.PrivateKey)
-	privKey.PublicKey.Curve = elliptic.P256()
-	privKey.D = new(big.Int).SetBytes(privateKey)
-	privKey.PublicKey.X, privKey.PublicKey.Y = privKey.PublicKey.Curve.ScalarBaseMult(privateKey)
-
-	r, s, err := ecdsa.Sign(rand.Reader, privKey, hash[:])
-	if err != nil {
-		return nil, err
-	}
-	return append(r.Bytes(), s.Bytes()...), nil
+	privKey, _ := btcec.PrivKeyFromBytes(privateKey)
+	sig := ecdsa.Sign(privKey, hash[:])
+	return sig.Serialize(), nil
 }
 
 func (t *TronAdapter) VerifySignature(publicKey []byte, txData []byte, signature []byte) (bool, error) {
-	if len(signature) < 64 {
-		return false, nil
-	}
 	hash := sha256.Sum256(txData)
-	r := new(big.Int).SetBytes(signature[:32])
-	s := new(big.Int).SetBytes(signature[32:])
-
-	pubKey := new(ecdsa.PublicKey)
-	pubKey.Curve = elliptic.P256()
-	if len(publicKey) == 65 && publicKey[0] == 0x04 {
-		pubKey.X = new(big.Int).SetBytes(publicKey[1:33])
-		pubKey.Y = new(big.Int).SetBytes(publicKey[33:65])
-	} else {
-		return false, nil
+	pubKey, err := btcec.ParsePubKey(publicKey)
+	if err != nil {
+		return false, err
 	}
-	return ecdsa.Verify(pubKey, hash[:], r, s), nil
+	sig, err := ecdsa.ParseSignature(signature)
+	if err != nil {
+		return false, err
+	}
+	return sig.Verify(hash[:], pubKey), nil
 }
 
 // LTCAdapter implements Litecoin address structures
@@ -330,35 +286,22 @@ func (l *LTCAdapter) GenerateAddress(privateKey []byte) (string, error) {
 
 func (l *LTCAdapter) SignTransaction(privateKey []byte, txData []byte) ([]byte, error) {
 	hash := sha256.Sum256(txData)
-	privKey := new(ecdsa.PrivateKey)
-	privKey.PublicKey.Curve = elliptic.P256()
-	privKey.D = new(big.Int).SetBytes(privateKey)
-	privKey.PublicKey.X, privKey.PublicKey.Y = privKey.PublicKey.Curve.ScalarBaseMult(privateKey)
-
-	r, s, err := ecdsa.Sign(rand.Reader, privKey, hash[:])
-	if err != nil {
-		return nil, err
-	}
-	return append(r.Bytes(), s.Bytes()...), nil
+	privKey, _ := btcec.PrivKeyFromBytes(privateKey)
+	sig := ecdsa.Sign(privKey, hash[:])
+	return sig.Serialize(), nil
 }
 
 func (l *LTCAdapter) VerifySignature(publicKey []byte, txData []byte, signature []byte) (bool, error) {
-	if len(signature) < 64 {
-		return false, nil
-	}
 	hash := sha256.Sum256(txData)
-	r := new(big.Int).SetBytes(signature[:32])
-	s := new(big.Int).SetBytes(signature[32:])
-
-	pubKey := new(ecdsa.PublicKey)
-	pubKey.Curve = elliptic.P256()
-	if len(publicKey) == 65 && publicKey[0] == 0x04 {
-		pubKey.X = new(big.Int).SetBytes(publicKey[1:33])
-		pubKey.Y = new(big.Int).SetBytes(publicKey[33:65])
-	} else {
-		return false, nil
+	pubKey, err := btcec.ParsePubKey(publicKey)
+	if err != nil {
+		return false, err
 	}
-	return ecdsa.Verify(pubKey, hash[:], r, s), nil
+	sig, err := ecdsa.ParseSignature(signature)
+	if err != nil {
+		return false, err
+	}
+	return sig.Verify(hash[:], pubKey), nil
 }
 
 // Registry handles modular registration and discovery of Blockchain Adapters
