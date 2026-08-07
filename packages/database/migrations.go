@@ -471,6 +471,171 @@ var schemaMigrations = []Migration{
 			);
 		`,
 	},
+	{
+		ID:   30,
+		Name: "create_permissions_and_rbac_tables",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS permissions (
+				name VARCHAR(100) PRIMARY KEY,
+				description TEXT NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+
+			CREATE TABLE IF NOT EXISTS role_permissions (
+				role VARCHAR(100) NOT NULL,
+				permission VARCHAR(100) NOT NULL,
+				PRIMARY KEY (role, permission),
+				FOREIGN KEY (permission) REFERENCES permissions(name) ON DELETE CASCADE
+			);
+
+			-- Seed default permissions
+			INSERT INTO permissions (name, description) VALUES
+				('wallet:read', 'Read wallet balance and addresses'),
+				('wallet:write', 'Withdraw assets and request new addresses'),
+				('trading:write', 'Place and cancel orders'),
+				('support:read', 'Support agent views and access'),
+				('risk:write', 'Compliance controls, risk halt, and user block'),
+				('system:admin', 'System operations like backup and recovery'),
+				('super:admin', 'Global destructive actions')
+			ON CONFLICT (name) DO NOTHING;
+
+			-- Seed default role-to-permission mappings
+			INSERT INTO role_permissions (role, permission) VALUES
+				('USER', 'wallet:read'),
+				('USER', 'wallet:write'),
+				('USER', 'trading:write'),
+
+				('VERIFIED_USER', 'wallet:read'),
+				('VERIFIED_USER', 'wallet:write'),
+				('VERIFIED_USER', 'trading:write'),
+
+				('VIP_USER', 'wallet:read'),
+				('VIP_USER', 'wallet:write'),
+				('VIP_USER', 'trading:write'),
+
+				('SUPPORT_AGENT', 'wallet:read'),
+				('SUPPORT_AGENT', 'support:read'),
+
+				('COMPLIANCE_OFFICER', 'wallet:read'),
+				('COMPLIANCE_OFFICER', 'support:read'),
+				('COMPLIANCE_OFFICER', 'risk:write'),
+
+				('SECURITY_OFFICER', 'wallet:read'),
+				('SECURITY_OFFICER', 'support:read'),
+				('SECURITY_OFFICER', 'risk:write'),
+
+				('ADMIN', 'wallet:read'),
+				('ADMIN', 'wallet:write'),
+				('ADMIN', 'trading:write'),
+				('ADMIN', 'support:read'),
+				('ADMIN', 'risk:write'),
+				('ADMIN', 'system:admin'),
+
+				('SUPER_ADMIN', 'wallet:read'),
+				('SUPER_ADMIN', 'wallet:write'),
+				('SUPER_ADMIN', 'trading:write'),
+				('SUPER_ADMIN', 'support:read'),
+				('SUPER_ADMIN', 'risk:write'),
+				('SUPER_ADMIN', 'system:admin'),
+				('SUPER_ADMIN', 'super:admin')
+			ON CONFLICT (role, permission) DO NOTHING;
+		`,
+	},
+	{
+		ID:   31,
+		Name: "create_sessions_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS user_sessions (
+				id VARCHAR(255) PRIMARY KEY,
+				user_id VARCHAR(255) NOT NULL,
+				device_id VARCHAR(255) DEFAULT '' NOT NULL,
+				ip_address VARCHAR(100) DEFAULT '' NOT NULL,
+				user_agent VARCHAR(255) DEFAULT '' NOT NULL,
+				refresh_token_hash VARCHAR(255) NOT NULL,
+				expires_at TIMESTAMP NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				is_revoked BOOLEAN DEFAULT FALSE NOT NULL,
+				FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+			);
+			CREATE INDEX IF NOT EXISTS idx_sessions_user ON user_sessions(user_id);
+			CREATE INDEX IF NOT EXISTS idx_sessions_token_hash ON user_sessions(refresh_token_hash);
+		`,
+	},
+	{
+		ID:   32,
+		Name: "create_api_keys_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS user_api_keys (
+				id VARCHAR(255) PRIMARY KEY,
+				user_id VARCHAR(255) NOT NULL,
+				label VARCHAR(255) DEFAULT '' NOT NULL,
+				api_key VARCHAR(255) UNIQUE NOT NULL,
+				api_secret_hash VARCHAR(255) NOT NULL,
+				permissions TEXT DEFAULT '' NOT NULL,
+				ip_allowlist TEXT DEFAULT '' NOT NULL,
+				expires_at TIMESTAMP NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				is_revoked BOOLEAN DEFAULT FALSE NOT NULL,
+				last_used_at TIMESTAMP,
+				FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+			);
+			CREATE INDEX IF NOT EXISTS idx_api_keys_user ON user_api_keys(user_id);
+			CREATE INDEX IF NOT EXISTS idx_api_keys_key ON user_api_keys(api_key);
+		`,
+	},
+	{
+		ID:   33,
+		Name: "create_brute_force_lockouts_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS brute_force_lockouts (
+				id VARCHAR(255) PRIMARY KEY,
+				identity_key VARCHAR(255) UNIQUE NOT NULL,
+				failed_attempts INT DEFAULT 0 NOT NULL,
+				locked_until TIMESTAMP,
+				updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+		`,
+	},
+	{
+		ID:   34,
+		Name: "create_security_audit_logs_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS security_audit_logs (
+				id VARCHAR(255) PRIMARY KEY,
+				event_type VARCHAR(100) NOT NULL,
+				severity VARCHAR(50) NOT NULL,
+				user_id VARCHAR(255) DEFAULT '' NOT NULL,
+				api_key_id VARCHAR(255) DEFAULT '' NOT NULL,
+				session_id VARCHAR(255) DEFAULT '' NOT NULL,
+				ip_address VARCHAR(100) DEFAULT '' NOT NULL,
+				user_agent VARCHAR(255) DEFAULT '' NOT NULL,
+				details TEXT DEFAULT '' NOT NULL,
+				metadata TEXT DEFAULT '' NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_audit_logs_user ON security_audit_logs(user_id);
+			CREATE INDEX IF NOT EXISTS idx_audit_logs_type ON security_audit_logs(event_type);
+		`,
+	},
+	{
+		ID:   35,
+		Name: "create_idempotency_records_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS idempotency_records (
+				id_key VARCHAR(255) NOT NULL,
+				user_id VARCHAR(255) NOT NULL,
+				operation VARCHAR(255) NOT NULL,
+				request_payload_hash VARCHAR(255) NOT NULL,
+				status VARCHAR(50) NOT NULL,
+				response_status INT NOT NULL,
+				response_body TEXT NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				PRIMARY KEY (id_key, user_id)
+			);
+			CREATE INDEX IF NOT EXISTS idx_idempotency_user ON idempotency_records(user_id);
+		`,
+	},
 }
 
 // RunMigrations executes schema migration steps on the pgx connection pool

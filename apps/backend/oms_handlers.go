@@ -1,8 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -15,6 +20,7 @@ import (
 // Global OMSRouter instance for the API Gateway handlers
 var globalOMSRouter *engine.OMSRouter
 var globalMarketServices *engine.MarketServices
+var globalMFATradingThreshold float64 = 100000.0
 
 func init() {
 	// Initialize full modular trading core engine stack on start
@@ -28,44 +34,79 @@ func init() {
 
 	globalOMSRouter = engine.NewOMSRouter(sm, val, risk, matcher, exec, settle)
 	globalMarketServices = engine.NewMarketServices()
+
+	// Parse MFA Trading Threshold from environment for professional configuration
+	if threshEnv := os.Getenv("MFA_TRADING_THRESHOLD"); threshEnv != "" {
+		if val, err := strconv.ParseFloat(threshEnv, 64); err == nil {
+			globalMFATradingThreshold = val
+		}
+	}
 }
 
 // RegisterOMSHandlers binds the advanced trading API handlers to the API Gateway router
 func RegisterOMSHandlers(r *gin.RouterGroup) {
 	oms := r.Group("/oms")
+	oms.Use(IdempotencyMiddleware())
 	{
-		oms.POST("/orders", handleCreateOrder)
-		oms.DELETE("/orders/:id", handleCancelOrder)
-		oms.POST("/orders/:id/replace", handleReplaceOrder)
-		oms.POST("/orders/cancel-bulk", handleBulkCancel)
-		oms.GET("/open", handleOpenOrders)
-		oms.GET("/history", handleOrderHistory)
-		oms.GET("/trades", handleGetMarketTrades)
+		// Trading endpoints (authenticated users with trading permission)
+		tradingGroup := oms.Group("")
+		tradingGroup.Use(RBACMiddleware("trading:write"))
+		{
+			tradingGroup.POST("/orders", handleCreateOrder)
+			tradingGroup.GET("/orders", handleListOrders)
+			tradingGroup.GET("/orders/:id", handleGetOrder)
+			tradingGroup.DELETE("/orders/:id", handleCancelOrder)
+			tradingGroup.POST("/orders/:id/replace", handleReplaceOrder)
+			tradingGroup.POST("/orders/cancel-bulk", handleBulkCancel)
+			tradingGroup.GET("/open", handleOpenOrders)
+			tradingGroup.GET("/history", handleOrderHistory)
+		}
 
-		// Risk & Admin APIs
-		oms.GET("/risk/status", handleGetRiskStatus)
-		oms.POST("/risk/halt", handleHaltTrading)
-		oms.POST("/risk/block", handleBlockUser)
-		oms.POST("/risk/suspend", handleSuspendMarket)
+		// Public/Authenticated general reading endpoints (wallet:read)
+		readGroup := oms.Group("")
+		readGroup.Use(RBACMiddleware("wallet:read"))
+		{
+			readGroup.GET("/trades", handleGetMarketTrades)
+			readGroup.GET("/fees/schedule", handleGetFeeSchedule)
+			readGroup.GET("/fees/vip", handleGetUserVIP)
+			readGroup.GET("/system/health", handleGetSystemHealth)
+			readGroup.GET("/risk/status", handleGetRiskStatus)
+		}
 
-		// Settlement & Clearing APIs
-		oms.GET("/settlements", handleGetSettlementsHistory)
-		oms.GET("/settlements/queue", handleGetSettlementsQueue)
-		oms.POST("/settlements/reprocess", handleReprocessSettlements)
+		// Support operations (support:read)
+		supportGroup := oms.Group("")
+		supportGroup.Use(RBACMiddleware("support:read"))
+		{
+			supportGroup.GET("/fees/revenue", handleGetRevenueSummary)
+			supportGroup.GET("/liquidity/stats", handleGetLiquidityStats)
+			supportGroup.GET("/surveillance/alerts", handleGetSurveillanceAlerts)
+		}
 
-		// Liquidity & Surveillance APIs
-		oms.GET("/liquidity/stats", handleGetLiquidityStats)
-		oms.GET("/surveillance/alerts", handleGetSurveillanceAlerts)
+		// Risk and compliance operations (risk:write)
+		riskGroup := oms.Group("")
+		riskGroup.Use(RBACMiddleware("risk:write"))
+		{
+			riskGroup.POST("/risk/halt", handleHaltTrading)
+			riskGroup.POST("/risk/block", handleBlockUser)
+			riskGroup.POST("/risk/suspend", handleSuspendMarket)
+			riskGroup.GET("/settlements", handleGetSettlementsHistory)
+			riskGroup.GET("/settlements/queue", handleGetSettlementsQueue)
+			riskGroup.POST("/settlements/reprocess", handleReprocessSettlements)
+		}
 
-		// Fee & Revenue APIs
-		oms.GET("/fees/schedule", handleGetFeeSchedule)
-		oms.GET("/fees/vip", handleGetUserVIP)
-		oms.GET("/fees/revenue", handleGetRevenueSummary)
+		// Administrative operations (system:admin)
+		adminGroup := oms.Group("")
+		adminGroup.Use(RBACMiddleware("system:admin"))
+		{
+			adminGroup.POST("/system/backup", handleTriggerBackup)
+		}
 
-		// Observability, Health, and Operations APIs
-		oms.GET("/system/health", handleGetSystemHealth)
-		oms.POST("/system/backup", handleTriggerBackup)
-		oms.POST("/system/recover", handleTriggerRecovery)
+		// Super admin operations (super:admin)
+		superGroup := oms.Group("")
+		superGroup.Use(RBACMiddleware("super:admin"))
+		{
+			superGroup.POST("/system/recover", handleTriggerRecovery)
+		}
 	}
 }
 
@@ -81,11 +122,30 @@ func handleGetSystemHealth(c *gin.Context) {
 
 func handleTriggerBackup(c *gin.Context) {
 	var req struct {
-		Type string `json:"type" binding:"required"`
+		Type    string `json:"type" binding:"required"`
+		MFACode string `json:"mfa_code"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Backup type required"})
 		return
+	}
+
+	claims, _ := c.Get("claims")
+	userClaims := claims.(*security.Claims)
+
+	// Verify MFA if enabled
+	if globalDB != nil {
+		var isMfaEnabled bool
+		var mfaSecret string
+		err := globalDB.Pool.QueryRow(context.Background(),
+			"SELECT is_mfa_enabled, mfa_secret FROM users WHERE id = $1", userClaims.UserID).
+			Scan(&isMfaEnabled, &mfaSecret)
+		if err == nil && isMfaEnabled && mfaSecret != "" {
+			if req.MFACode == "" || !security.ValidateTOTP(mfaSecret, req.MFACode) {
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "MFA verification failed: valid MFA code required to trigger backup"})
+				return
+			}
+		}
 	}
 
 	c.JSON(http.StatusAccepted, gin.H{
@@ -98,6 +158,32 @@ func handleTriggerBackup(c *gin.Context) {
 }
 
 func handleTriggerRecovery(c *gin.Context) {
+	var req struct {
+		MFACode string `json:"mfa_code" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "MFA code required for recovery operations"})
+		return
+	}
+
+	claims, _ := c.Get("claims")
+	userClaims := claims.(*security.Claims)
+
+	// Verify MFA if enabled
+	if globalDB != nil {
+		var isMfaEnabled bool
+		var mfaSecret string
+		err := globalDB.Pool.QueryRow(context.Background(),
+			"SELECT is_mfa_enabled, mfa_secret FROM users WHERE id = $1", userClaims.UserID).
+			Scan(&isMfaEnabled, &mfaSecret)
+		if err == nil && isMfaEnabled && mfaSecret != "" {
+			if !security.ValidateTOTP(mfaSecret, req.MFACode) {
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "MFA verification failed: valid MFA code required to trigger system recovery"})
+				return
+			}
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Disaster recovery journal replay completed successfully",
 		"status":  "SUCCESS",
@@ -178,6 +264,12 @@ func handleGetRiskStatus(c *gin.Context) {
 }
 
 func handleHaltTrading(c *gin.Context) {
+	claims, _ := c.Get("claims")
+	userClaims := claims.(*security.Claims)
+	if !VerifyMFAProtection(c, userClaims.UserID) {
+		return
+	}
+
 	var req struct {
 		Halt bool `json:"halt"`
 	}
@@ -190,6 +282,12 @@ func handleHaltTrading(c *gin.Context) {
 }
 
 func handleBlockUser(c *gin.Context) {
+	claims, _ := c.Get("claims")
+	userClaims := claims.(*security.Claims)
+	if !VerifyMFAProtection(c, userClaims.UserID) {
+		return
+	}
+
 	var req struct {
 		UserID string `json:"user_id" binding:"required"`
 		Block  bool   `json:"block"`
@@ -207,6 +305,12 @@ func handleBlockUser(c *gin.Context) {
 }
 
 func handleSuspendMarket(c *gin.Context) {
+	claims, _ := c.Get("claims")
+	userClaims := claims.(*security.Claims)
+	if !VerifyMFAProtection(c, userClaims.UserID) {
+		return
+	}
+
 	var req struct {
 		Symbol  string `json:"symbol" binding:"required"`
 		Suspend bool   `json:"suspend"`
@@ -274,6 +378,14 @@ func handleCreateOrder(c *gin.Context) {
 		order.TimeInForce = engine.TIF_GTC
 	}
 
+	// Enforce MFA for high-value orders
+	orderValue := order.Price * order.Quantity
+	if orderValue >= globalMFATradingThreshold {
+		if !VerifyMFAProtection(c, userClaims.UserID) {
+			return
+		}
+	}
+
 	// Route order through validated pipeline
 	err := globalOMSRouter.ProcessIncomingOrder(context.Background(), order, "USDT", "BTC", c.ClientIP(), "API_GATEWAY")
 	if err != nil {
@@ -335,6 +447,14 @@ func handleReplaceOrder(c *gin.Context) {
 	}
 	if newOrder.TimeInForce == "" {
 		newOrder.TimeInForce = engine.TIF_GTC
+	}
+
+	// Enforce MFA for high-value replacements
+	orderValue := newOrder.Price * newOrder.Quantity
+	if orderValue >= globalMFATradingThreshold {
+		if !VerifyMFAProtection(c, userClaims.UserID) {
+			return
+		}
 	}
 
 	err := globalOMSRouter.ReplaceOrder(context.Background(), cancelOrderID, newOrder, "USDT", "BTC", c.ClientIP(), "API_GATEWAY")
@@ -402,4 +522,197 @@ func handleOrderHistory(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"orders": closedOrders,
 	})
+}
+
+
+func handleListOrders(c *gin.Context) {
+	claims, _ := c.Get("claims")
+	userClaims := claims.(*security.Claims)
+
+	symbolFilter := strings.ToUpper(c.Query("symbol"))
+	statusFilter := strings.ToUpper(c.Query("status"))
+
+	orders := globalOMSRouter.GetUserOrders(userClaims.UserID)
+	filtered := make([]*engine.AdvancedOrder, 0)
+
+	for _, o := range orders {
+		if symbolFilter != "" && strings.ToUpper(o.Symbol) != symbolFilter {
+			continue
+		}
+		if statusFilter != "" && strings.ToUpper(string(o.Status)) != statusFilter {
+			continue
+		}
+		filtered = append(filtered, o)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"orders": filtered,
+	})
+}
+
+func handleGetOrder(c *gin.Context) {
+	orderID := c.Param("id")
+	if orderID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Order ID required"})
+		return
+	}
+
+	claims, _ := c.Get("claims")
+	userClaims := claims.(*security.Claims)
+
+	order, err := globalOMSRouter.GetOrder(orderID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Order not found", "details": err.Error()})
+		return
+	}
+
+	// Ownership check
+	if order.UserID != userClaims.UserID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "You do not have permission to access this order"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"order": order,
+	})
+}
+
+type responseBodyWriter struct {
+	gin.ResponseWriter
+	body *bytes.Buffer
+}
+
+func (w responseBodyWriter) Write(b []byte) (int, error) {
+	w.body.Write(b)
+	return w.ResponseWriter.Write(b)
+}
+
+// IdempotencyMiddleware ensures strict double-execution protection using standard X-Idempotency-Key
+func IdempotencyMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		idKey := c.GetHeader("X-Idempotency-Key")
+		if idKey == "" {
+			c.Next()
+			return
+		}
+
+		claimsVal, exists := c.Get("claims")
+		if !exists {
+			c.Next()
+			return
+		}
+		claims, ok := claimsVal.(*security.Claims)
+		if !ok || claims.UserID == "" {
+			c.Next()
+			return
+		}
+
+		// 1. Read body and compute SHA-256 hash
+		var bodyBytes []byte
+		if c.Request.Body != nil {
+			bodyBytes, _ = io.ReadAll(c.Request.Body)
+			c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+		}
+		hash := sha256.Sum256(bodyBytes)
+		payloadHash := hex.EncodeToString(hash[:])
+
+		if globalDB == nil {
+			c.Next()
+			return
+		}
+
+		ctx := c.Request.Context()
+
+		// 2. Query existing idempotency record
+		var dbHash, status, responseBody string
+		var responseStatus int
+		err := globalDB.Pool.QueryRow(ctx,
+			"SELECT request_payload_hash, status, response_status, response_body FROM idempotency_records WHERE id_key = $1 AND user_id = $2",
+			idKey, claims.UserID).Scan(&dbHash, &status, &responseStatus, &responseBody)
+
+		if err == nil {
+			// Record exists!
+			if status == "PROCESSING" {
+				c.JSON(http.StatusConflict, gin.H{"error": "Concurrent request in progress with same idempotency key"})
+				c.Abort()
+				return
+			}
+
+			// Status is COMPLETED, check payload match
+			if dbHash != payloadHash {
+				c.JSON(http.StatusConflict, gin.H{"error": "Conflicting payload with same idempotency key"})
+				c.Abort()
+				return
+			}
+
+			// Return cached response
+			c.Header("X-Cache-Lookup", "HIT - Idempotent Retry")
+			c.Data(responseStatus, "application/json", []byte(responseBody))
+			c.Abort()
+			return
+		}
+
+		// 3. Insert record with status PROCESSING
+		_, err = globalDB.Pool.Exec(ctx,
+			"INSERT INTO idempotency_records (id_key, user_id, operation, request_payload_hash, status, response_status, response_body) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+			idKey, claims.UserID, c.Request.Method+" "+c.Request.URL.Path, payloadHash, "PROCESSING", 0, "")
+		if err != nil {
+			c.JSON(http.StatusConflict, gin.H{"error": "Concurrent duplicate request detected"})
+			c.Abort()
+			return
+		}
+
+		// 4. Capture Response
+		w := &responseBodyWriter{body: bytes.NewBufferString(""), ResponseWriter: c.Writer}
+		c.Writer = w
+
+		c.Next()
+
+		// 5. Update record with status COMPLETED
+		respStatus := c.Writer.Status()
+		respBody := w.body.String()
+
+		_, _ = globalDB.Pool.Exec(ctx,
+			"UPDATE idempotency_records SET status = $1, response_status = $2, response_body = $3 WHERE id_key = $4 AND user_id = $5",
+			"COMPLETED", respStatus, respBody, idKey, claims.UserID)
+	}
+}
+
+// VerifyMFAProtection checks if the user has enabled MFA/2FA, and verifies the X-MFA-Code header if enabled
+func VerifyMFAProtection(c *gin.Context, userID string) bool {
+	if globalDB == nil {
+		return true // Standalone mock test fallback
+	}
+
+	var isMFAEnabled bool
+	var mfaSecret string
+	err := globalDB.Pool.QueryRow(c.Request.Context(),
+		"SELECT is_mfa_enabled, mfa_secret FROM users WHERE id = $1", userID).
+		Scan(&isMFAEnabled, &mfaSecret)
+	if err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Forbidden: user record not found"})
+		c.Abort()
+		return false
+	}
+
+	if isMFAEnabled {
+		mfaCode := c.GetHeader("X-MFA-Code")
+		if mfaCode == "" {
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error": "MFA code required",
+				"details": "This is a sensitive operation requiring multi-factor authentication. Please provide your TOTP code in the X-MFA-Code header.",
+			})
+			c.Abort()
+			return false
+		}
+		if !security.ValidateTOTP(mfaSecret, mfaCode) {
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error": "Invalid MFA code",
+				"details": "The provided TOTP code is incorrect or expired.",
+			})
+			c.Abort()
+			return false
+		}
+	}
+	return true
 }
