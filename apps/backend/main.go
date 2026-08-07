@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -17,6 +19,36 @@ import (
 	"velyxora/packages/logger"
 	"velyxora/packages/security"
 	"velyxora/packages/types"
+)
+
+// Mock database structures for offline standalone environments
+type MockUser struct {
+	ID           string
+	Email        string
+	PasswordHash string
+	IsMFAEnabled bool
+	MFASecret    string
+	Role         string
+}
+
+type MockBackupCode struct {
+	ID        string
+	UserID    string
+	CodeHash  string
+	IsUsed    bool
+	CreatedAt time.Time
+}
+
+type MockMFASession struct {
+	UserID    string
+	ExpiresAt time.Time
+}
+
+var (
+	mockUsersMu     sync.Mutex
+	mockUsers       = make(map[string]*MockUser)
+	mockBackupCodes []*MockBackupCode
+	mockMFASessions = make(map[string]*MockMFASession)
 )
 
 // Config represents server environment configuration
@@ -236,7 +268,6 @@ func main() {
 					return
 				}
 
-				// For P001/P002 foundation we perform a mock creation if database is not connected
 				userID := "usr_mock_" + fmt.Sprintf("%d", time.Now().UnixNano())
 				if db != nil {
 					// Prepare DB insert logic
@@ -247,6 +278,26 @@ func main() {
 						c.JSON(http.StatusConflict, gin.H{"error": "Email is already registered"})
 						return
 					}
+				} else {
+					// Persist user in mock storage for offline support
+					mockUsersMu.Lock()
+					// Check if email already exists
+					for _, u := range mockUsers {
+						if u.Email == sanitizedEmail {
+							mockUsersMu.Unlock()
+							c.JSON(http.StatusConflict, gin.H{"error": "Email is already registered"})
+							return
+						}
+					}
+					mockUsers[userID] = &MockUser{
+						ID:           userID,
+						Email:        sanitizedEmail,
+						PasswordHash: hash,
+						IsMFAEnabled: false,
+						MFASecret:    "",
+						Role:         string(types.RoleUser),
+					}
+					mockUsersMu.Unlock()
 				}
 
 				c.JSON(http.StatusCreated, gin.H{
@@ -271,15 +322,16 @@ func main() {
 					return
 				}
 
-				// Verification standard
 				var userID string
 				var hashedPassword string
 				var role = string(types.RoleUser)
+				var isMFAEnabled bool
+				var encryptedMFASecret string
 
 				if db != nil {
 					err := db.Pool.QueryRow(context.Background(),
-						"SELECT id, password_hash, role FROM users WHERE email = $1", req.Email).
-						Scan(&userID, &hashedPassword, &role)
+						"SELECT id, password_hash, role, is_mfa_enabled, mfa_secret FROM users WHERE email = $1", req.Email).
+						Scan(&userID, &hashedPassword, &role, &isMFAEnabled, &encryptedMFASecret)
 					if err != nil {
 						c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid email or password"})
 						return
@@ -290,16 +342,81 @@ func main() {
 						return
 					}
 				} else {
-					// Fallback Mock authentication for standalone verification/development runs
-					userID = "usr_mock_123"
-					hashedPassword, _ = security.HashPassword("StrongPass1!")
-					if req.Email != "test@velyxora.com" || req.Password != "StrongPass1!" {
-						c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid mock credentials"})
-						return
+					// Check from offline mock storage
+					mockUsersMu.Lock()
+					var foundUser *MockUser
+					for _, u := range mockUsers {
+						if u.Email == req.Email {
+							foundUser = u
+							break
+						}
+					}
+					mockUsersMu.Unlock()
+
+					if foundUser != nil {
+						userID = foundUser.ID
+						hashedPassword = foundUser.PasswordHash
+						role = foundUser.Role
+						isMFAEnabled = foundUser.IsMFAEnabled
+						encryptedMFASecret = foundUser.MFASecret
+
+						if !security.CheckPasswordHash(req.Password, hashedPassword) {
+							c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid email or password"})
+							return
+						}
+					} else {
+						// Fallback default mock user if storage is empty
+						if req.Email == "test@velyxora.com" && req.Password == "StrongPass1!" {
+							userID = "usr_mock_123"
+							hashedPassword, _ = security.HashPassword("StrongPass1!")
+							role = string(types.RoleUser)
+							isMFAEnabled = false
+							encryptedMFASecret = ""
+						} else {
+							c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid mock credentials"})
+							return
+						}
 					}
 				}
 
-				// Generate Tokens (Hardened Expiration)
+				// If MFA is enabled, enforce Multi-Factor Verification Challenge Flow
+				if isMFAEnabled {
+					// Generate unique cryptographically-secure MFA Session Token (mfa_token)
+					mfaTokenBytes := make([]byte, 24)
+					_, _ = rand.Read(mfaTokenBytes)
+					mfaToken := fmt.Sprintf("mfa_sec_%d_%x", time.Now().UnixNano(), mfaTokenBytes)
+
+					if db != nil {
+						_, err := db.Pool.Exec(context.Background(),
+							"INSERT INTO user_mfa_sessions (id, user_id, expires_at) VALUES ($1, $2, $3)",
+							mfaToken, userID, time.Now().Add(5*time.Minute))
+						if err != nil {
+							c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to register MFA challenge state"})
+							return
+						}
+
+						// Log high-fidelity Security Event: Challenge Issued
+						_, _ = db.Pool.Exec(context.Background(),
+							"INSERT INTO security_events (id, user_id, event_type, ip_address, user_agent, details) VALUES ($1, $2, $3, $4, $5, $6)",
+							"sev_"+fmt.Sprintf("%d", time.Now().UnixNano()), userID, "MFA_CHALLENGE_ISSUED", c.ClientIP(), c.Request.UserAgent(), "MFA challenge token issued for login sequence")
+					} else {
+						mockUsersMu.Lock()
+						mockMFASessions[mfaToken] = &MockMFASession{
+							UserID:    userID,
+							ExpiresAt: time.Now().Add(5 * time.Minute),
+						}
+						mockUsersMu.Unlock()
+					}
+
+					c.JSON(http.StatusOK, gin.H{
+						"mfa_required": true,
+						"mfa_token":    mfaToken,
+						"message":      "Multi-Factor Authentication required to finalize session",
+					})
+					return
+				}
+
+				// Generate Tokens directly if MFA is not enabled
 				accessToken, refreshToken, err := security.GenerateJWT(
 					userID,
 					req.Email,
@@ -315,9 +432,239 @@ func main() {
 				c.JSON(http.StatusOK, gin.H{
 					"access_token":  accessToken,
 					"refresh_token": refreshToken,
-					"expires_in":    900, // 15 mins
+					"expires_in":    900,
 					"role":          role,
 				})
+			})
+
+			auth.POST("/mfa-verify", func(c *gin.Context) {
+				var req struct {
+					MFAToken string `json:"mfa_token" binding:"required"`
+					TOTPCode string `json:"totp_code" binding:"required"`
+				}
+
+				if err := c.ShouldBindJSON(&req); err != nil {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "MFA token and verification code are required"})
+					return
+				}
+
+				var userID string
+				var mfaSessionExpired bool
+
+				if db != nil {
+					var expiresAt time.Time
+					err := db.Pool.QueryRow(context.Background(),
+						"SELECT user_id, expires_at FROM user_mfa_sessions WHERE id = $1", req.MFAToken).
+						Scan(&userID, &expiresAt)
+					if err != nil {
+						c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired MFA session challenge"})
+						return
+					}
+					mfaSessionExpired = time.Now().After(expiresAt)
+				} else {
+					mockUsersMu.Lock()
+					sess, exists := mockMFASessions[req.MFAToken]
+					mockUsersMu.Unlock()
+
+					if !exists {
+						c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired MFA session challenge"})
+						return
+					}
+					userID = sess.UserID
+					mfaSessionExpired = time.Now().After(sess.ExpiresAt)
+				}
+
+				if mfaSessionExpired {
+					c.JSON(http.StatusUnauthorized, gin.H{"error": "MFA session challenge has expired (5 minute limit)"})
+					return
+				}
+
+				// Enforce adaptive brute-force/rate-limiting check
+				locked, remaining := security.CheckMFAVerifyRateLimit(userID)
+				if locked {
+					c.JSON(http.StatusTooManyRequests, gin.H{
+						"error":             "Account suspended from verification actions due to too many failed attempts",
+						"remaining_seconds": int(remaining.Seconds()),
+					})
+					return
+				}
+
+				// Retrieve User Details
+				var userEmail string
+				var encryptedMFASecret string
+				var userRole string
+
+				if db != nil {
+					err := db.Pool.QueryRow(context.Background(),
+						"SELECT email, mfa_secret, role FROM users WHERE id = $1", userID).
+						Scan(&userEmail, &encryptedMFASecret, &userRole)
+					if err != nil {
+						c.JSON(http.StatusUnauthorized, gin.H{"error": "User account lookup failed"})
+						return
+					}
+				} else {
+					mockUsersMu.Lock()
+					u, exists := mockUsers[userID]
+					mockUsersMu.Unlock()
+
+					if !exists {
+						c.JSON(http.StatusUnauthorized, gin.H{"error": "User account lookup failed"})
+						return
+					}
+					userEmail = u.Email
+					encryptedMFASecret = u.MFASecret
+					userRole = u.Role
+				}
+
+				// Decrypt secure secret storage key
+				decryptedSecret, err := security.DecryptSecret(encryptedMFASecret, []byte(cfg.JWTSecret))
+				if err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to decrypt secure cryptographic parameters"})
+					return
+				}
+
+				// Verify standard TOTP + Replay Attack check
+				isValidTOTP := security.VerifyTOTP(decryptedSecret, req.TOTPCode)
+				if isValidTOTP {
+					if security.IsReplayAttack(userID, req.TOTPCode) {
+						c.JSON(http.StatusConflict, gin.H{"error": "Token has already been verified. Replay attack blocked."})
+						return
+					}
+
+					// Verification success
+					security.RecordMFASuccess(userID)
+
+					if db != nil {
+						// Clear session
+						_, _ = db.Pool.Exec(context.Background(), "DELETE FROM user_mfa_sessions WHERE id = $1", req.MFAToken)
+						// Audit security event
+						_, _ = db.Pool.Exec(context.Background(),
+							"INSERT INTO security_events (id, user_id, event_type, ip_address, user_agent, details) VALUES ($1, $2, $3, $4, $5, $6)",
+							"sev_"+fmt.Sprintf("%d", time.Now().UnixNano()), userID, "MFA_LOGIN_SUCCESS", c.ClientIP(), c.Request.UserAgent(), "Successful Multi-Factor TOTP authorization")
+					} else {
+						mockUsersMu.Lock()
+						delete(mockMFASessions, req.MFAToken)
+						mockUsersMu.Unlock()
+					}
+
+					// Generate Finalized Tokens
+					accessToken, refreshToken, err := security.GenerateJWT(
+						userID,
+						userEmail,
+						cfg.JWTSecret,
+						15*time.Minute,
+						24*time.Hour,
+					)
+					if err != nil {
+						c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to sign authentication tokens"})
+						return
+					}
+
+					c.JSON(http.StatusOK, gin.H{
+						"access_token":  accessToken,
+						"refresh_token": refreshToken,
+						"expires_in":    900,
+						"role":          userRole,
+					})
+					return
+				}
+
+				// If TOTP fails, verify if it is an active recovery backup code
+				var isBackupCodeMatched bool
+				var matchedCodeID string
+
+				if db != nil {
+					rows, err := db.Pool.Query(context.Background(),
+						"SELECT id, code_hash FROM user_mfa_backup_codes WHERE user_id = $1 AND is_used = FALSE", userID)
+					if err == nil {
+						defer rows.Close()
+						for rows.Next() {
+							var bid string
+							var chash string
+							if err := rows.Scan(&bid, &chash); err == nil {
+								// Match using bcrypt comparison
+								err = security.CompareBcrypt(chash, req.TOTPCode)
+								if err == nil {
+									isBackupCodeMatched = true
+									matchedCodeID = bid
+									break
+								}
+							}
+						}
+					}
+				} else {
+					mockUsersMu.Lock()
+					for _, bc := range mockBackupCodes {
+						if bc.UserID == userID && !bc.IsUsed {
+							err = security.CompareBcrypt(bc.CodeHash, req.TOTPCode)
+							if err == nil {
+								isBackupCodeMatched = true
+								matchedCodeID = bc.ID
+								break
+							}
+						}
+					}
+					mockUsersMu.Unlock()
+				}
+
+				if isBackupCodeMatched {
+					// Reset failures
+					security.RecordMFASuccess(userID)
+
+					if db != nil {
+						// Mark code as used
+						_, _ = db.Pool.Exec(context.Background(), "UPDATE user_mfa_backup_codes SET is_used = TRUE WHERE id = $1", matchedCodeID)
+						// Clear session
+						_, _ = db.Pool.Exec(context.Background(), "DELETE FROM user_mfa_sessions WHERE id = $1", req.MFAToken)
+						// Audit security log
+						_, _ = db.Pool.Exec(context.Background(),
+							"INSERT INTO security_events (id, user_id, event_type, ip_address, user_agent, details) VALUES ($1, $2, $3, $4, $5, $6)",
+							"sev_"+fmt.Sprintf("%d", time.Now().UnixNano()), userID, "BACKUP_CODE_USED", c.ClientIP(), c.Request.UserAgent(), "Authorized using backup recovery code")
+					} else {
+						mockUsersMu.Lock()
+						for _, bc := range mockBackupCodes {
+							if bc.ID == matchedCodeID {
+								bc.IsUsed = true
+								break
+							}
+						}
+						delete(mockMFASessions, req.MFAToken)
+						mockUsersMu.Unlock()
+					}
+
+					// Generate Finalized Tokens
+					accessToken, refreshToken, err := security.GenerateJWT(
+						userID,
+						userEmail,
+						cfg.JWTSecret,
+						15*time.Minute,
+						24*time.Hour,
+					)
+					if err != nil {
+						c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to sign authentication tokens"})
+						return
+					}
+
+					c.JSON(http.StatusOK, gin.H{
+						"access_token":         accessToken,
+						"refresh_token":        refreshToken,
+						"expires_in":           900,
+						"role":                 userRole,
+						"backup_code_accepted": true,
+					})
+					return
+				}
+
+				// Verification failed (both TOTP and backup recovery matched zero)
+				security.RecordMFAFailure(userID)
+
+				if db != nil {
+					_, _ = db.Pool.Exec(context.Background(),
+						"INSERT INTO security_events (id, user_id, event_type, ip_address, user_agent, details) VALUES ($1, $2, $3, $4, $5, $6)",
+						"sev_"+fmt.Sprintf("%d", time.Now().UnixNano()), userID, "MFA_VERIFY_FAILURE", c.ClientIP(), c.Request.UserAgent(), "Failed TOTP authorization verification attempt")
+				}
+
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid multi-factor code or backup code"})
 			})
 		}
 
@@ -372,15 +719,364 @@ func main() {
 			})
 		}
 
-		// Security Audit Actions (MFA foundation configurations under P003)
+		// Security Audit Actions (MFA configurations under P003)
 		mfa := v1.Group("/mfa")
 		mfa.Use(authMiddleware(cfg.JWTSecret))
 		{
-			mfa.POST("/enable", func(c *gin.Context) {
+			// Get MFA Status
+			mfa.GET("/status", func(c *gin.Context) {
+				claims, _ := c.Get("claims")
+				userClaims := claims.(*security.Claims)
+
+				var isMFAEnabled bool
+				if db != nil {
+					_ = db.Pool.QueryRow(context.Background(),
+						"SELECT is_mfa_enabled FROM users WHERE id = $1", userClaims.UserID).
+						Scan(&isMFAEnabled)
+				} else {
+					mockUsersMu.Lock()
+					if u, exists := mockUsers[userClaims.UserID]; exists {
+						isMFAEnabled = u.IsMFAEnabled
+					}
+					mockUsersMu.Unlock()
+				}
+
 				c.JSON(http.StatusOK, gin.H{
-					"mfa_secret": "JBSWY3DPEHPK3PXP",
-					"qr_code_url": "otpauth://totp/Velyxora:user?secret=JBSWY3DPEHPK3PXP&issuer=Velyxora",
-					"backup_codes": []string{"1234-5678", "abcd-efgh", "9876-5432"},
+					"is_mfa_enabled": isMFAEnabled,
+				})
+			})
+
+			// Initiate MFA Enrollment (Stage secret & generate backup codes)
+			mfa.POST("/enable", func(c *gin.Context) {
+				claims, _ := c.Get("claims")
+				userClaims := claims.(*security.Claims)
+
+				// Generate unique cryptographically-secure Base32 TOTP secret
+				rawSecret, err := security.GenerateMFASecret()
+				if err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate MFA secret key"})
+					return
+				}
+
+				// Encrypt the MFA secret before persisting inside PostgreSQL database
+				encryptedSecret, err := security.EncryptSecret(rawSecret, []byte(cfg.JWTSecret))
+				if err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to securely encrypt MFA parameters"})
+					return
+				}
+
+				// Generate secure backup recovery codes
+				rawBackupCodes, hashedBackupCodes, err := security.GenerateBackupCodes()
+				if err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate backup recovery codes"})
+					return
+				}
+
+				// Persist staged secret and hashed recovery codes
+				if db != nil {
+					tx, err := db.Pool.Begin(context.Background())
+					if err != nil {
+						c.JSON(http.StatusInternalServerError, gin.H{"error": "Database transaction failure"})
+						return
+					}
+					defer func() { _ = tx.Rollback(context.Background()) }()
+
+					// Save staged parameters (MFA remains disabled until the user confirms with their first valid token)
+					_, err = tx.Exec(context.Background(),
+						"UPDATE users SET mfa_secret = $1, is_mfa_enabled = FALSE WHERE id = $2",
+						encryptedSecret, userClaims.UserID)
+					if err != nil {
+						c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update user security profile"})
+						return
+					}
+
+					// Clear any existing stale backup codes
+					_, _ = tx.Exec(context.Background(), "DELETE FROM user_mfa_backup_codes WHERE user_id = $1", userClaims.UserID)
+
+					// Save new backup codes
+					for idx, hashed := range hashedBackupCodes {
+						id := fmt.Sprintf("bc_%d_%d", time.Now().UnixNano(), idx)
+						_, err = tx.Exec(context.Background(),
+							"INSERT INTO user_mfa_backup_codes (id, user_id, code_hash, is_used) VALUES ($1, $2, $3, FALSE)",
+							id, userClaims.UserID, hashed)
+						if err != nil {
+							c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to register backup security codes"})
+							return
+						}
+					}
+
+					err = tx.Commit(context.Background())
+					if err != nil {
+						c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to finalize database records"})
+						return
+					}
+
+					// Audit security log
+					_, _ = db.Pool.Exec(context.Background(),
+						"INSERT INTO security_events (id, user_id, event_type, ip_address, user_agent, details) VALUES ($1, $2, $3, $4, $5, $6)",
+						"sev_"+fmt.Sprintf("%d", time.Now().UnixNano()), userClaims.UserID, "MFA_ENROLL_INITIATED", c.ClientIP(), c.Request.UserAgent(), "User initiated MFA enrollment flow")
+				} else {
+					mockUsersMu.Lock()
+					if u, exists := mockUsers[userClaims.UserID]; exists {
+						u.MFASecret = encryptedSecret
+						u.IsMFAEnabled = false
+					}
+					// Clear previous backup codes
+					var cleanBackup []*MockBackupCode
+					for _, bc := range mockBackupCodes {
+						if bc.UserID != userClaims.UserID {
+							cleanBackup = append(cleanBackup, bc)
+						}
+					}
+					mockBackupCodes = cleanBackup
+
+					// Save new backup codes
+					for _, hashed := range hashedBackupCodes {
+						mockBackupCodes = append(mockBackupCodes, &MockBackupCode{
+							ID:        "bc_" + fmt.Sprintf("%d", time.Now().UnixNano()),
+							UserID:    userClaims.UserID,
+							CodeHash:  hashed,
+							IsUsed:    false,
+							CreatedAt: time.Now(),
+						})
+					}
+					mockUsersMu.Unlock()
+				}
+
+				// Construct standard totp uri
+				totpUri := security.FormulateTOTPUri(userClaims.Email, rawSecret)
+
+				c.JSON(http.StatusOK, gin.H{
+					"mfa_secret":   rawSecret,
+					"qr_code_url":  totpUri,
+					"backup_codes": rawBackupCodes,
+				})
+			})
+
+			// Confirm enrollment by validating first code
+			mfa.POST("/verify", func(c *gin.Context) {
+				var req struct {
+					TOTPCode string `json:"totp_code" binding:"required"`
+				}
+
+				if err := c.ShouldBindJSON(&req); err != nil {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "Verification code is required"})
+					return
+				}
+
+				claims, _ := c.Get("claims")
+				userClaims := claims.(*security.Claims)
+
+				var encryptedMFASecret string
+				if db != nil {
+					err := db.Pool.QueryRow(context.Background(),
+						"SELECT mfa_secret FROM users WHERE id = $1", userClaims.UserID).
+						Scan(&encryptedMFASecret)
+					if err != nil || encryptedMFASecret == "" {
+						c.JSON(http.StatusBadRequest, gin.H{"error": "No staged MFA secret configuration found. Please enroll first."})
+						return
+					}
+				} else {
+					mockUsersMu.Lock()
+					if u, exists := mockUsers[userClaims.UserID]; exists {
+						encryptedMFASecret = u.MFASecret
+					}
+					mockUsersMu.Unlock()
+					if encryptedMFASecret == "" {
+						c.JSON(http.StatusBadRequest, gin.H{"error": "No staged MFA secret configuration found. Please enroll first."})
+						return
+					}
+				}
+
+				// Decrypt staged secret
+				decryptedSecret, err := security.DecryptSecret(encryptedMFASecret, []byte(cfg.JWTSecret))
+				if err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to decrypt secure parameters"})
+					return
+				}
+
+				// Validate TOTP code
+				if !security.VerifyTOTP(decryptedSecret, req.TOTPCode) {
+					c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "Invalid verification token. Enrollment failed."})
+					return
+				}
+
+				// Enable MFA
+				if db != nil {
+					_, err = db.Pool.Exec(context.Background(),
+						"UPDATE users SET is_mfa_enabled = TRUE WHERE id = $1", userClaims.UserID)
+					if err != nil {
+						c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to enable MFA inside database"})
+						return
+					}
+
+					// Audit security log
+					_, _ = db.Pool.Exec(context.Background(),
+						"INSERT INTO security_events (id, user_id, event_type, ip_address, user_agent, details) VALUES ($1, $2, $3, $4, $5, $6)",
+						"sev_"+fmt.Sprintf("%d", time.Now().UnixNano()), userClaims.UserID, "MFA_ENABLED", c.ClientIP(), c.Request.UserAgent(), "User successfully activated MFA standard protection")
+				} else {
+					mockUsersMu.Lock()
+					if u, exists := mockUsers[userClaims.UserID]; exists {
+						u.IsMFAEnabled = true
+					}
+					mockUsersMu.Unlock()
+				}
+
+				c.JSON(http.StatusOK, gin.H{
+					"message": "Multi-Factor Authentication enabled successfully",
+				})
+			})
+
+			// Disable MFA
+			mfa.POST("/disable", func(c *gin.Context) {
+				var req struct {
+					TOTPCode string `json:"totp_code" binding:"required"`
+				}
+
+				if err := c.ShouldBindJSON(&req); err != nil {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "Verification code or backup code required to disable MFA"})
+					return
+				}
+
+				claims, _ := c.Get("claims")
+				userClaims := claims.(*security.Claims)
+
+				var isMFAEnabled bool
+				var encryptedMFASecret string
+
+				if db != nil {
+					err := db.Pool.QueryRow(context.Background(),
+						"SELECT is_mfa_enabled, mfa_secret FROM users WHERE id = $1", userClaims.UserID).
+						Scan(&isMFAEnabled, &encryptedMFASecret)
+					if err != nil {
+						c.JSON(http.StatusInternalServerError, gin.H{"error": "User profile lookup failure"})
+						return
+					}
+				} else {
+					mockUsersMu.Lock()
+					if u, exists := mockUsers[userClaims.UserID]; exists {
+						isMFAEnabled = u.IsMFAEnabled
+						encryptedMFASecret = u.MFASecret
+					}
+					mockUsersMu.Unlock()
+				}
+
+				if !isMFAEnabled {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "MFA is not enabled"})
+					return
+				}
+
+				// Decrypt secret
+				decryptedSecret, err := security.DecryptSecret(encryptedMFASecret, []byte(cfg.JWTSecret))
+				if err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to decrypt secure parameters"})
+					return
+				}
+
+				// Check TOTP validation
+				isValidCode := security.VerifyTOTP(decryptedSecret, req.TOTPCode)
+				var isBackupCodeMatched bool
+				var matchedCodeID string
+
+				if !isValidCode {
+					// Fallback check backup codes
+					if db != nil {
+						rows, err := db.Pool.Query(context.Background(),
+							"SELECT id, code_hash FROM user_mfa_backup_codes WHERE user_id = $1 AND is_used = FALSE", userClaims.UserID)
+						if err == nil {
+							defer rows.Close()
+							for rows.Next() {
+								var bid string
+								var chash string
+								if err := rows.Scan(&bid, &chash); err == nil {
+									err = security.CompareBcrypt(chash, req.TOTPCode)
+									if err == nil {
+										isBackupCodeMatched = true
+										matchedCodeID = bid
+										break
+									}
+								}
+							}
+						}
+					} else {
+						mockUsersMu.Lock()
+						for _, bc := range mockBackupCodes {
+							if bc.UserID == userClaims.UserID && !bc.IsUsed {
+								err = security.CompareBcrypt(bc.CodeHash, req.TOTPCode)
+								if err == nil {
+									isBackupCodeMatched = true
+									matchedCodeID = bc.ID
+									break
+								}
+							}
+						}
+						mockUsersMu.Unlock()
+					}
+				}
+
+				if !isValidCode && !isBackupCodeMatched {
+					c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid verification token. MFA could not be disabled."})
+					return
+				}
+				_ = matchedCodeID
+
+				// Disable MFA and remove backup codes
+				if db != nil {
+					tx, err := db.Pool.Begin(context.Background())
+					if err != nil {
+						c.JSON(http.StatusInternalServerError, gin.H{"error": "Transaction failure"})
+						return
+					}
+					defer func() { _ = tx.Rollback(context.Background()) }()
+
+					_, err = tx.Exec(context.Background(),
+						"UPDATE users SET is_mfa_enabled = FALSE, mfa_secret = '' WHERE id = $1", userClaims.UserID)
+					if err != nil {
+						c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update user security status"})
+						return
+					}
+
+					_, err = tx.Exec(context.Background(), "DELETE FROM user_mfa_backup_codes WHERE user_id = $1", userClaims.UserID)
+					if err != nil {
+						c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to purge security backup codes"})
+						return
+					}
+
+					if isBackupCodeMatched {
+						// Record the backup code usage details before deletion if we want audit trail trace
+						_, _ = tx.Exec(context.Background(),
+							"INSERT INTO security_events (id, user_id, event_type, ip_address, user_agent, details) VALUES ($1, $2, $3, $4, $5, $6)",
+							"sev_"+fmt.Sprintf("%d", time.Now().UnixNano()), userClaims.UserID, "MFA_DISABLED_BY_BACKUP", c.ClientIP(), c.Request.UserAgent(), "MFA disabled using recovery code")
+					} else {
+						_, _ = tx.Exec(context.Background(),
+							"INSERT INTO security_events (id, user_id, event_type, ip_address, user_agent, details) VALUES ($1, $2, $3, $4, $5, $6)",
+							"sev_"+fmt.Sprintf("%d", time.Now().UnixNano()), userClaims.UserID, "MFA_DISABLED", c.ClientIP(), c.Request.UserAgent(), "MFA disabled using standard TOTP code")
+					}
+
+					err = tx.Commit(context.Background())
+					if err != nil {
+						c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to finalize database records"})
+						return
+					}
+				} else {
+					mockUsersMu.Lock()
+					if u, exists := mockUsers[userClaims.UserID]; exists {
+						u.IsMFAEnabled = false
+						u.MFASecret = ""
+					}
+					// Remove backup codes
+					var cleanBackup []*MockBackupCode
+					for _, bc := range mockBackupCodes {
+						if bc.UserID != userClaims.UserID {
+							cleanBackup = append(cleanBackup, bc)
+						}
+					}
+					mockBackupCodes = cleanBackup
+					mockUsersMu.Unlock()
+				}
+
+				c.JSON(http.StatusOK, gin.H{
+					"message": "Multi-Factor Authentication disabled successfully",
 				})
 			})
 		}

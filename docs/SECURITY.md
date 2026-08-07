@@ -1,6 +1,6 @@
 # VELYXORA SECURITY HARDENING & AUDITING
 
-This manual details the production security updates introduced in our platform under P002.
+This manual details the production security updates introduced in our platform under P002 and P003.
 
 ## 1. Gateway Security Implementations
 
@@ -26,3 +26,13 @@ The user registration core implements a multi-character criteria validation logi
 ## 3. Auditing and Tracing
 
 * **X-Trace-ID Correlation**: Every HTTP request initiates a unique trace ID identifier propagated downstream inside service logs and transaction logs, allowing full trace audits of client request chains.
+
+---
+
+## 4. Multi-Factor Authentication (MFA) & Strong Auth (P003)
+
+The platform enforces standards-compliant **RFC 6238 TOTP** and backup codes authentication:
+* **Storage Encryption**: AES-GCM-256 encrypted MFA secrets inside PostgreSQL.
+* **Replay Blockers**: Global cache tracking verified tokens for 60 seconds.
+* **Failed Lockouts**: 5 consecutive failures locks authentication for 15 minutes.
+* **Bcrypt Backup Codes**: 8 secure hashed recovery codes per user.

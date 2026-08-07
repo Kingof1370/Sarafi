@@ -8,7 +8,7 @@ This manual details our REST endpoints for authentication and trading operations
 
 ---
 
-## 1. Authentication Endpoints
+## 1. Authentication & MFA Endpoints
 
 ### Register User
 * **URL**: `/api/v1/auth/register`
@@ -32,8 +32,8 @@ This manual details our REST endpoints for authentication and trading operations
   "password": "super-secure-passphrase"
 }
 ```
-* **Response Status**: `200 OK`
-* **Response Payload**:
+* **Response Status**: `200 OK` (Or returns verification challenge if MFA active)
+* **Response Payload (MFA Inactive)**:
 ```json
 {
   "access_token": "eyJhbGciOi...",
@@ -41,6 +41,70 @@ This manual details our REST endpoints for authentication and trading operations
   "expires_in": 900
 }
 ```
+* **Response Payload (MFA Active)**:
+```json
+{
+  "mfa_required": true,
+  "mfa_token": "mfa_sec_xxxx",
+  "message": "Multi-Factor Authentication required to finalize session"
+}
+```
+
+### Finalize MFA Login Verification
+* **URL**: `/api/v1/auth/mfa-verify`
+* **Method**: `POST`
+* **Request Payload**:
+```json
+{
+  "mfa_token": "mfa_sec_xxxx",
+  "totp_code": "000000"
+}
+```
+* **Response Status**: `200 OK`
+
+### Get MFA Status (Requires `Authorization`)
+* **URL**: `/api/v1/mfa/status`
+* **Method**: `GET`
+* **Response Payload**:
+```json
+{
+  "is_mfa_enabled": true
+}
+```
+
+### Initiate MFA Enrollment (Requires `Authorization`)
+* **URL**: `/api/v1/mfa/enable`
+* **Method**: `POST`
+* **Response Payload**:
+```json
+{
+  "mfa_secret": "JBSWY3DPEHPK3PXP",
+  "qr_code_url": "otpauth://totp/...",
+  "backup_codes": ["1234-5678", "abcd-efgh", "9876-5432"]
+}
+```
+
+### Confirm MFA Enrollment Activation (Requires `Authorization`)
+* **URL**: `/api/v1/mfa/verify`
+* **Method**: `POST`
+* **Request Payload**:
+```json
+{
+  "totp_code": "000000"
+}
+```
+* **Response Status**: `200 OK`
+
+### Disable MFA Protection (Requires `Authorization`)
+* **URL**: `/api/v1/mfa/disable`
+* **Method**: `POST`
+* **Request Payload**:
+```json
+{
+  "totp_code": "000000"
+}
+```
+* **Response Status**: `200 OK`
 
 ---
 

@@ -471,6 +471,43 @@ var schemaMigrations = []Migration{
 			);
 		`,
 	},
+	{
+		ID:   30,
+		Name: "create_mfa_tables",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS user_mfa_backup_codes (
+				id VARCHAR(255) PRIMARY KEY,
+				user_id VARCHAR(255) NOT NULL,
+				code_hash VARCHAR(255) NOT NULL,
+				is_used BOOLEAN DEFAULT FALSE NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+			);
+			CREATE INDEX IF NOT EXISTS idx_mfa_backup_user_id ON user_mfa_backup_codes (user_id);
+
+			CREATE TABLE IF NOT EXISTS security_events (
+				id VARCHAR(255) PRIMARY KEY,
+				user_id VARCHAR(255) NOT NULL,
+				event_type VARCHAR(100) NOT NULL,
+				ip_address VARCHAR(50) NOT NULL,
+				user_agent TEXT NOT NULL,
+				details TEXT NOT NULL,
+				timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+			);
+			CREATE INDEX IF NOT EXISTS idx_security_events_user_id ON security_events (user_id);
+			CREATE INDEX IF NOT EXISTS idx_security_events_type ON security_events (event_type);
+
+			CREATE TABLE IF NOT EXISTS user_mfa_sessions (
+				id VARCHAR(255) PRIMARY KEY,
+				user_id VARCHAR(255) NOT NULL,
+				expires_at TIMESTAMP NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+			);
+			CREATE INDEX IF NOT EXISTS idx_mfa_sessions_user_id ON user_mfa_sessions (user_id);
+		`,
+	},
 }
 
 // RunMigrations executes schema migration steps on the pgx connection pool
