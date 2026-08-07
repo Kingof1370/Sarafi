@@ -42,7 +42,7 @@ func TestAuthMiddleware(t *testing.T) {
 	}
 
 	// Test valid token
-	access, _, _ := security.GenerateJWT("usr_123", "test@test.com", secret, 5*time.Minute, 1*time.Hour)
+	access, _, _ := security.GenerateJWT("usr_123", "test@test.com", "sess_123", secret, 5*time.Minute, 1*time.Hour)
 	w3 := httptest.NewRecorder()
 	req3, _ := http.NewRequest("GET", "/protected", nil)
 	req3.Header.Set("Authorization", "Bearer "+access)
@@ -89,7 +89,7 @@ func TestWalletWithdrawalValidationAPI(t *testing.T) {
 	}
 
 	// Submit withdrawal request with invalid address format
-	access, _, _ := security.GenerateJWT("usr_123", "test@test.com", secret, 5*time.Minute, 1*time.Hour)
+	access, _, _ := security.GenerateJWT("usr_123", "test@test.com", "sess_123", secret, 5*time.Minute, 1*time.Hour)
 	w := httptest.NewRecorder()
 	payload := `{"asset":"ETH","amount":1.5,"address":"invalid_addr"}`
 	req, _ := http.NewRequest("POST", "/api/v1/wallet/withdraw", bytes.NewReader([]byte(payload)))

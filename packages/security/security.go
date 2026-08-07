@@ -25,17 +25,19 @@ func CheckPasswordHash(password, hash string) bool {
 
 // Claims represents JWT payload structure
 type Claims struct {
-	UserID string `json:"user_id"`
-	Email  string `json:"email"`
+	UserID    string `json:"user_id"`
+	Email     string `json:"email"`
+	SessionID string `json:"session_id,omitempty"`
 	jwt.RegisteredClaims
 }
 
 // GenerateJWT creates both Access and Refresh JWT tokens
-func GenerateJWT(userID, email, secret string, accessDuration, refreshDuration time.Duration) (string, string, error) {
+func GenerateJWT(userID, email, sessionID, secret string, accessDuration, refreshDuration time.Duration) (string, string, error) {
 	// Access Token
 	accessClaims := &Claims{
-		UserID: userID,
-		Email:  email,
+		UserID:    userID,
+		Email:     email,
+		SessionID: sessionID,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(accessDuration)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),

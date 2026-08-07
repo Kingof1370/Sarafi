@@ -32,6 +32,11 @@ type Config struct {
 	KafkaBrokers []string
 }
 
+var globalDB *database.DB
+var globalRedis *common.RedisClient
+var globalKafkaProducer *common.KafkaProducer
+var globalJWTSecret string
+
 func main() {
 	// 1. Initialize Log
 	log := logger.NewLogger(logger.Config{
@@ -54,6 +59,7 @@ func main() {
 		RedisAddr:    getEnv("REDIS_ADDR", "localhost:6379"),
 		KafkaBrokers: strings.Split(getEnv("KAFKA_BROKERS", "localhost:9092"), ","),
 	}
+	globalJWTSecret = cfg.JWTSecret
 
 	// 3. Setup Postgres Connection
 	db, err := database.NewConnectionPool(database.Config{
@@ -67,6 +73,7 @@ func main() {
 	if err != nil {
 		log.Warn(fmt.Sprintf("Database connection failed (continuing bootstrap in fallback mode): %v", err))
 	} else {
+		globalDB = db
 		defer db.Close()
 		log.Info("PostgreSQL connection pool initialized successfully.")
 		// Run database schema migrations
@@ -85,16 +92,15 @@ func main() {
 	if err != nil {
 		log.Warn(fmt.Sprintf("Redis connection failed (continuing bootstrap in fallback mode): %v", err))
 	} else {
+		globalRedis = redisClient
 		log.Info("Redis client connected successfully.")
 	}
 
 	// 5. Setup Kafka Producer
 	kafkaProducer := common.NewKafkaProducer(cfg.KafkaBrokers)
+	globalKafkaProducer = kafkaProducer
 	defer kafkaProducer.Close()
 	log.Info("Kafka Producer registered.")
-
-	// 6. Setup Rate Limiter
-	limiter := common.NewRateLimiter(100, time.Minute)
 
 	// 6.5 Setup WebSocket Gateway (P005 real-time core)
 	wsGateway := NewWSGateway(cfg.JWTSecret)
@@ -156,17 +162,8 @@ func main() {
 		)
 	})
 
-	// Rate Limiting Middleware
-	r.Use(func(c *gin.Context) {
-		ip := c.ClientIP()
-		if !limiter.Allow(ip) {
-			log.Warn("Rate limit exceeded", "ip", ip)
-			c.JSON(http.StatusTooManyRequests, gin.H{"error": "Too many requests. Please try again later."})
-			c.Abort()
-			return
-		}
-		c.Next()
-	})
+	// Redis Distributed Rate Limiting Middleware
+	r.Use(RateLimiterMiddleware())
 
 	// Health Check / Readiness / Liveness Probe Endpoint
 	r.GET("/health", func(c *gin.Context) {
@@ -201,9 +198,12 @@ func main() {
 	// V1 API Router Group
 	v1 := r.Group("/api/v1")
 	{
+		// Register API Key management routes
+		RegisterAPIKeyHandlers(v1)
+
 		// OMS Handlers (Authenticated)
 		omsGroup := v1.Group("")
-		omsGroup.Use(authMiddleware(cfg.JWTSecret))
+		omsGroup.Use(UnifiedAuthMiddleware(cfg.JWTSecret))
 		RegisterOMSHandlers(omsGroup)
 
 		// Auth Routes
@@ -271,6 +271,25 @@ func main() {
 					return
 				}
 
+				clientIP := c.ClientIP()
+
+				// 1. Check Brute-Force Lockout Status (Email and IP)
+				if isLocked, lockedUntil, err := CheckBruteForceAndLock(req.Email); err == nil && isLocked {
+					c.JSON(http.StatusLocked, gin.H{
+						"error":        "Account is temporarily locked due to excessive login failures.",
+						"locked_until": lockedUntil.Format(time.RFC3339),
+					})
+					return
+				}
+
+				if isLocked, lockedUntil, err := CheckBruteForceAndLock(clientIP); err == nil && isLocked {
+					c.JSON(http.StatusLocked, gin.H{
+						"error":        "Your IP address is temporarily locked due to excessive login failures.",
+						"locked_until": lockedUntil.Format(time.RFC3339),
+					})
+					return
+				}
+
 				// Verification standard
 				var userID string
 				var hashedPassword string
@@ -281,11 +300,15 @@ func main() {
 						"SELECT id, password_hash, role FROM users WHERE email = $1", req.Email).
 						Scan(&userID, &hashedPassword, &role)
 					if err != nil {
+						_ = RecordLockoutFailure(req.Email)
+						_ = RecordLockoutFailure(clientIP)
 						c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid email or password"})
 						return
 					}
 
 					if !security.CheckPasswordHash(req.Password, hashedPassword) {
+						_ = RecordLockoutFailure(req.Email)
+						_ = RecordLockoutFailure(clientIP)
 						c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid email or password"})
 						return
 					}
@@ -299,10 +322,15 @@ func main() {
 					}
 				}
 
-				// Generate Tokens (Hardened Expiration)
+				// Reset Lockout Failures on Success
+				_ = ResetLockoutFailures(req.Email)
+				_ = ResetLockoutFailures(clientIP)
+
+				// Generate initial JWTs (Hardened Expiration)
 				accessToken, refreshToken, err := security.GenerateJWT(
 					userID,
 					req.Email,
+					"temp_sess",
 					cfg.JWTSecret,
 					15*time.Minute,
 					24*time.Hour,
@@ -312,18 +340,183 @@ func main() {
 					return
 				}
 
+				// Create session in PostgreSQL & Redis, enforcing concurrent limits
+				deviceID := c.GetHeader("X-Device-ID")
+				if deviceID == "" {
+					deviceID = "dev_unknown"
+				}
+				sessionID, err := CreateSession(userID, deviceID, c.ClientIP(), c.Request.UserAgent(), refreshToken, time.Now().Add(24*time.Hour))
+				if err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to establish secure session"})
+					return
+				}
+
+				// Re-generate access JWT with the actual session ID
+				accessToken, _, err = security.GenerateJWT(
+					userID,
+					req.Email,
+					sessionID,
+					cfg.JWTSecret,
+					15*time.Minute,
+					24*time.Hour,
+				)
+				if err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to sign session token"})
+					return
+				}
+
 				c.JSON(http.StatusOK, gin.H{
 					"access_token":  accessToken,
 					"refresh_token": refreshToken,
+					"session_id":    sessionID,
 					"expires_in":    900, // 15 mins
 					"role":          role,
 				})
+			})
+
+			auth.POST("/refresh", func(c *gin.Context) {
+				var req struct {
+					RefreshToken string `json:"refresh_token" binding:"required"`
+				}
+				if err := c.ShouldBindJSON(&req); err != nil {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "Refresh token required"})
+					return
+				}
+
+				claims, err := security.ValidateJWT(req.RefreshToken, cfg.JWTSecret)
+				if err != nil {
+					c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired refresh token", "details": err.Error()})
+					return
+				}
+
+				_, newRefresh, err := security.GenerateJWT(claims.UserID, claims.Email, "temp", cfg.JWTSecret, 15*time.Minute, 24*time.Hour)
+				if err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to sign tokens"})
+					return
+				}
+
+				sessionID, userID, err := RotateSession(req.RefreshToken, newRefresh, c.ClientIP(), c.Request.UserAgent())
+				if err != nil {
+					c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+					return
+				}
+
+				finalAccess, finalRefresh, err := security.GenerateJWT(userID, claims.Email, sessionID, cfg.JWTSecret, 15*time.Minute, 24*time.Hour)
+				if err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to sign tokens"})
+					return
+				}
+
+				if globalDB != nil {
+					_, _ = globalDB.Pool.Exec(context.Background(),
+						"UPDATE user_sessions SET refresh_token_hash = $1 WHERE id = $2",
+						hashToken(finalRefresh), sessionID)
+				}
+
+				c.JSON(http.StatusOK, gin.H{
+					"access_token":  finalAccess,
+					"refresh_token": finalRefresh,
+					"session_id":    sessionID,
+					"expires_in":    900,
+				})
+			})
+
+			auth.POST("/logout", authMiddleware(cfg.JWTSecret), func(c *gin.Context) {
+				claims, _ := c.Get("claims")
+				userClaims := claims.(*security.Claims)
+
+				err := RevokeSession(userClaims.SessionID, c.ClientIP(), c.Request.UserAgent())
+				if err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to revoke session"})
+					return
+				}
+
+				c.JSON(http.StatusOK, gin.H{"message": "Logged out successfully"})
+			})
+
+			auth.POST("/logout-all", authMiddleware(cfg.JWTSecret), func(c *gin.Context) {
+				claims, _ := c.Get("claims")
+				userClaims := claims.(*security.Claims)
+
+				err := RevokeAllSessions(userClaims.UserID, c.ClientIP(), c.Request.UserAgent(), "USER_LOGOUT_ALL")
+				if err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to revoke sessions"})
+					return
+				}
+
+				c.JSON(http.StatusOK, gin.H{"message": "Logged out of all active sessions successfully"})
+			})
+
+			auth.GET("/sessions", authMiddleware(cfg.JWTSecret), func(c *gin.Context) {
+				claims, _ := c.Get("claims")
+				userClaims := claims.(*security.Claims)
+
+				type SessionResp struct {
+					ID        string    `json:"id"`
+					DeviceID  string    `json:"device_id"`
+					IPAddress string    `json:"ip_address"`
+					UserAgent string    `json:"user_agent"`
+					CreatedAt time.Time `json:"created_at"`
+					IsCurrent bool      `json:"is_current"`
+				}
+
+				sessions := make([]SessionResp, 0)
+				if globalDB != nil {
+					rows, err := globalDB.Pool.Query(context.Background(),
+						"SELECT id, device_id, ip_address, user_agent, created_at FROM user_sessions WHERE user_id = $1 AND is_revoked = FALSE AND expires_at > NOW() ORDER BY created_at DESC",
+						userClaims.UserID)
+					if err == nil {
+						defer rows.Close()
+						for rows.Next() {
+							var s SessionResp
+							errScan := rows.Scan(&s.ID, &s.DeviceID, &s.IPAddress, &s.UserAgent, &s.CreatedAt)
+							if errScan == nil {
+								s.IsCurrent = (s.ID == userClaims.SessionID)
+								sessions = append(sessions, s)
+							}
+						}
+					}
+				} else {
+					sessions = append(sessions, SessionResp{
+						ID:        userClaims.SessionID,
+						DeviceID:  "dev_mock",
+						IPAddress: c.ClientIP(),
+						UserAgent: c.Request.UserAgent(),
+						CreatedAt: time.Now(),
+						IsCurrent: true,
+					})
+				}
+
+				c.JSON(http.StatusOK, gin.H{"sessions": sessions})
+			})
+
+			auth.DELETE("/sessions/:id", authMiddleware(cfg.JWTSecret), func(c *gin.Context) {
+				claims, _ := c.Get("claims")
+				userClaims := claims.(*security.Claims)
+				sessionID := c.Param("id")
+
+				if globalDB != nil {
+					var ownerID string
+					err := globalDB.Pool.QueryRow(context.Background(), "SELECT user_id FROM user_sessions WHERE id = $1", sessionID).Scan(&ownerID)
+					if err != nil || ownerID != userClaims.UserID {
+						c.JSON(http.StatusForbidden, gin.H{"error": "Forbidden: you do not own this session"})
+						return
+					}
+				}
+
+				err := RevokeSession(sessionID, c.ClientIP(), c.Request.UserAgent())
+				if err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to revoke session"})
+					return
+				}
+
+				c.JSON(http.StatusOK, gin.H{"message": "Session successfully terminated"})
 			})
 		}
 
 		// Authenticated Routes
 		trading := v1.Group("/trading")
-		trading.Use(authMiddleware(cfg.JWTSecret))
+		trading.Use(UnifiedAuthMiddleware(cfg.JWTSecret))
 		{
 			trading.POST("/orders", func(c *gin.Context) {
 				var req struct {
@@ -374,7 +567,7 @@ func main() {
 
 		// Security Audit Actions (MFA foundation configurations under P003)
 		mfa := v1.Group("/mfa")
-		mfa.Use(authMiddleware(cfg.JWTSecret))
+		mfa.Use(UnifiedAuthMiddleware(cfg.JWTSecret))
 		{
 			mfa.POST("/enable", func(c *gin.Context) {
 				c.JSON(http.StatusOK, gin.H{
@@ -387,7 +580,7 @@ func main() {
 
 		// P004 Wallet, Deposit, Withdrawal, Asset APIs
 		wallet := v1.Group("/wallet")
-		wallet.Use(authMiddleware(cfg.JWTSecret))
+		wallet.Use(UnifiedAuthMiddleware(cfg.JWTSecret))
 		{
 			// Fetch user asset balances
 			wallet.GET("/balances", func(c *gin.Context) {
@@ -530,6 +723,21 @@ func main() {
 	log.Info("Velyxora REST Gateway exited successfully.")
 }
 
+// UnifiedAuthMiddleware combines API Key authentication and standard JWT session authentication
+func UnifiedAuthMiddleware(jwtSecret string) gin.HandlerFunc {
+	apiKeyAuth := APIKeyAuthMiddleware()
+	jwtAuth := authMiddleware(jwtSecret)
+
+	return func(c *gin.Context) {
+		apiKey := c.GetHeader("X-API-KEY")
+		if apiKey != "" {
+			apiKeyAuth(c)
+		} else {
+			jwtAuth(c)
+		}
+	}
+}
+
 // authMiddleware enforces valid JWT presence in Authorization headers
 func authMiddleware(jwtSecret string) gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -550,6 +758,13 @@ func authMiddleware(jwtSecret string) gin.HandlerFunc {
 		claims, err := security.ValidateJWT(parts[1], jwtSecret)
 		if err != nil {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired token", "details": err.Error()})
+			c.Abort()
+			return
+		}
+
+		// Verify that the session has not been revoked
+		if claims.SessionID != "" && IsSessionRevoked(claims.SessionID) {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized: session has been revoked"})
 			c.Abort()
 			return
 		}
