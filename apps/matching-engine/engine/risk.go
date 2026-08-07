@@ -1,9 +1,11 @@
 package engine
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"time"
+	"velyxora/packages/database"
 	"velyxora/packages/types"
 )
 
@@ -20,6 +22,7 @@ const (
 // RiskEngine manages pre-trade validation, post-trade settlement checks, STP, and abuse blocklists
 type RiskEngine struct {
 	mu               sync.RWMutex
+	db               *database.DB                  // authoritative database reference
 	userBalances     map[string]map[string]float64 // userID -> asset -> available amount
 	activeHolds      map[string]map[string]float64 // userID -> asset -> held amount
 	dailyVolume      map[string]float64            // userID -> cumulative daily USD volume
@@ -173,64 +176,126 @@ func (re *RiskEngine) ValidateOrder(order *types.Order, quoteAsset, baseAsset st
 		}
 	}
 
-	// 6. Balance verification
+	// 6. Balance verification and atomic reservation
+	var requiredAmount float64
+	var targetAsset string
 	if order.Side == types.SideBuy {
-		requiredAmount := order.Quantity * order.Price * (1.0 + feeRate)
+		requiredAmount = order.Quantity * order.Price * (1.0 + feeRate)
+		targetAsset = quoteAsset
+	} else {
+		requiredAmount = order.Quantity
+		targetAsset = baseAsset
+	}
 
-		available := 0.0
-		if bals, ok := re.userBalances[order.UserID]; ok {
-			available = bals[quoteAsset]
+	if re.db != nil {
+		ctx := context.Background()
+		tx, err := re.db.Pool.Begin(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to begin atomic database reservation tx: %w", err)
 		}
-		holds := 0.0
-		if hlds, ok := re.activeHolds[order.UserID]; ok {
-			holds = hlds[quoteAsset]
+		defer tx.Rollback(ctx)
+
+		var available, reserved, total float64
+		err = tx.QueryRow(ctx,
+			"SELECT available, reserved, total FROM balances WHERE user_id = $1 AND asset = $2 FOR UPDATE",
+			order.UserID, targetAsset).Scan(&available, &reserved, &total)
+		if err != nil {
+			return fmt.Errorf("insufficient funds: required %f %s, available 0.0", requiredAmount, targetAsset)
 		}
 
-		if (available - holds) < requiredAmount {
-			return fmt.Errorf("insufficient funds: required %f %s, available %f", requiredAmount, quoteAsset, available-holds)
+		if available < requiredAmount {
+			return fmt.Errorf("insufficient funds: required %f %s, available %f", requiredAmount, targetAsset, available)
 		}
 
-		// Apply Hold
+		newAvailable := available - requiredAmount
+		newReserved := reserved + requiredAmount
+
+		_, err = tx.Exec(ctx,
+			"UPDATE balances SET available = $1, reserved = $2, updated_at = NOW() WHERE user_id = $3 AND asset = $4",
+			newAvailable, newReserved, order.UserID, targetAsset)
+		if err != nil {
+			return fmt.Errorf("failed to persist database reservation: %w", err)
+		}
+
+		err = tx.Commit(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to commit database reservation: %w", err)
+		}
+
+		// Sync to in-memory state for consistency
+		if _, ok := re.userBalances[order.UserID]; !ok {
+			re.userBalances[order.UserID] = make(map[string]float64)
+		}
+		re.userBalances[order.UserID][targetAsset] = total
+
 		if _, ok := re.activeHolds[order.UserID]; !ok {
 			re.activeHolds[order.UserID] = make(map[string]float64)
 		}
-		re.activeHolds[order.UserID][quoteAsset] += requiredAmount
+		re.activeHolds[order.UserID][targetAsset] = newReserved
 
 	} else {
-		requiredAmount := order.Quantity
-
+		// Standalone memory-only fallback
 		available := 0.0
 		if bals, ok := re.userBalances[order.UserID]; ok {
-			available = bals[baseAsset]
+			available = bals[targetAsset]
 		}
 		holds := 0.0
 		if hlds, ok := re.activeHolds[order.UserID]; ok {
-			holds = hlds[baseAsset]
+			holds = hlds[targetAsset]
 		}
 
 		if (available - holds) < requiredAmount {
-			return fmt.Errorf("insufficient asset balance: required %f %s, available %f", requiredAmount, baseAsset, available-holds)
+			return fmt.Errorf("insufficient funds: required %f %s, available %f", requiredAmount, targetAsset, available-holds)
 		}
 
 		// Apply Hold
 		if _, ok := re.activeHolds[order.UserID]; !ok {
 			re.activeHolds[order.UserID] = make(map[string]float64)
 		}
-		re.activeHolds[order.UserID][baseAsset] += requiredAmount
+		re.activeHolds[order.UserID][targetAsset] += requiredAmount
 	}
 
 	return nil
 }
 
-// ReleaseHold clears a balance hold
+// ReleaseHold clears a balance hold and releases reservation atomically in database
 func (re *RiskEngine) ReleaseHold(userID, asset string, amount float64) {
 	re.mu.Lock()
 	defer re.mu.Unlock()
 
+	// Update in-memory hold
 	if userHolds, ok := re.activeHolds[userID]; ok {
 		userHolds[asset] -= amount
 		if userHolds[asset] < 0 {
 			userHolds[asset] = 0
+		}
+	}
+
+	// Update database reservation atomically
+	if re.db != nil {
+		ctx := context.Background()
+		tx, err := re.db.Pool.Begin(ctx)
+		if err != nil {
+			return
+		}
+		defer tx.Rollback(ctx)
+
+		var available, reserved float64
+		err = tx.QueryRow(ctx,
+			"SELECT available, reserved FROM balances WHERE user_id = $1 AND asset = $2 FOR UPDATE",
+			userID, asset).Scan(&available, &reserved)
+		if err == nil {
+			releaseAmt := amount
+			if releaseAmt > reserved {
+				releaseAmt = reserved
+			}
+			newAvailable := available + releaseAmt
+			newReserved := reserved - releaseAmt
+
+			_, _ = tx.Exec(ctx,
+				"UPDATE balances SET available = $1, reserved = $2, updated_at = NOW() WHERE user_id = $3 AND asset = $4",
+				newAvailable, newReserved, userID, asset)
+			_ = tx.Commit(ctx)
 		}
 	}
 }
@@ -272,4 +337,11 @@ func (re *RiskEngine) VerifySelfTrade(buyerID, sellerID string) (bool, STPMode) 
 		return true, re.stpMode
 	}
 	return false, STP_Allow
+}
+
+// SetDB dynamically configures or updates the database reference
+func (re *RiskEngine) SetDB(db *database.DB) {
+	re.mu.Lock()
+	defer re.mu.Unlock()
+	re.db = db
 }

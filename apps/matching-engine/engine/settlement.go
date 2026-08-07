@@ -148,10 +148,10 @@ func (se *SettlementEngine) executeSettlementTransaction(ctx context.Context, jo
 	}
 	defer tx.Rollback(ctx)
 
-	// 1. Debit Buyer Quote Asset: Price * Quantity + BuyerFee
+	// 1. Debit Buyer Quote Asset: Price * Quantity + BuyerFee (from Reserved)
 	buyerDebit := exec.Price*exec.Quantity + exec.BuyerFee
 	_, err = tx.Exec(ctx,
-		"UPDATE balances SET available = available - $1, total = total - $1, updated_at = NOW() WHERE user_id = $2 AND asset = $3",
+		"UPDATE balances SET reserved = reserved - $1, total = total - $1, updated_at = NOW() WHERE user_id = $2 AND asset = $3",
 		buyerDebit, exec.BuyerID, job.QuoteAsset)
 	if err != nil {
 		return fmt.Errorf("failed to debit buyer quote balance: %w", err)
@@ -166,9 +166,9 @@ func (se *SettlementEngine) executeSettlementTransaction(ctx context.Context, jo
 		return fmt.Errorf("failed to credit buyer base balance: %w", err)
 	}
 
-	// 3. Debit Seller Base Asset: Quantity
+	// 3. Debit Seller Base Asset: Quantity (from Reserved)
 	_, err = tx.Exec(ctx,
-		"UPDATE balances SET available = available - $1, total = total - $1, updated_at = NOW() WHERE user_id = $2 AND asset = $3",
+		"UPDATE balances SET reserved = reserved - $1, total = total - $1, updated_at = NOW() WHERE user_id = $2 AND asset = $3",
 		exec.Quantity, exec.SellerID, job.BaseAsset)
 	if err != nil {
 		return fmt.Errorf("failed to debit seller base balance: %w", err)
@@ -277,4 +277,11 @@ func (se *SettlementEngine) GetPendingJobsCount() int {
 	se.mu.RLock()
 	defer se.mu.RUnlock()
 	return len(se.queue)
+}
+
+// SetDB dynamically configures or updates the postgres connection pool
+func (se *SettlementEngine) SetDB(db *database.DB) {
+	se.mu.Lock()
+	defer se.mu.Unlock()
+	se.db = db
 }

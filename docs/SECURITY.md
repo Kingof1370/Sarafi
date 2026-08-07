@@ -1,28 +1,22 @@
-# VELYXORA SECURITY HARDENING & AUDITING
+# Velyxora Security Specification
 
-This manual details the production security updates introduced in our platform under P002.
+This document details the core security guidelines, database migrations, and structural controls of Velyxora.
 
-## 1. Gateway Security Implementations
-
-* **X-Frame-Options (DENY)**: Completely blocks frame loading to mitigate clickjacking attacks.
-* **X-Content-Type-Options (nosniff)**: Eliminates MIME-type sniffing vulnerabilities.
-* **Content-Security-Policy (CSP)**: Standard headers configured with `default-src 'self'` to completely avoid Cross-Site Scripting (XSS).
-* **CORS Policies**: Explicit origin mapping and headers validation rules.
-* **Rate Limiting Foundation**: Custom in-memory IP request counters designed to defend REST endpoints from denial of service attempts.
+## 1. Cryptographic Standard
+- **Password Storage**: Argon2/Bcrypt is used for password hashing.
+- **Envelope Encryption**: AES-256-GCM is used to encrypt sensitive keys inside PostgreSQL.
+- **API Signing**: HMAC-SHA256 is used for request authentication and payload verification.
+- **MFA standard**: RFC-6238 TOTP is verified server-side using Base32 credentials.
 
 ---
 
-## 2. Advanced Password Policy
-
-The user registration core implements a multi-character criteria validation logic:
-1. Minimum length of **8 characters**.
-2. Inclusion of at least one **uppercase letter**.
-3. Inclusion of at least one **lowercase letter**.
-4. Inclusion of at least one **numeric digit**.
-5. Inclusion of at least one **special character/symbol**.
-
----
-
-## 3. Auditing and Tracing
-
-* **X-Trace-ID Correlation**: Every HTTP request initiates a unique trace ID identifier propagated downstream inside service logs and transaction logs, allowing full trace audits of client request chains.
+## 2. Durability & Stream Audit Trails
+- **Kafka Event Stream**: Security actions and logs are broadcast over the `velyxora-security-events` topic to feed downline surveillance or real-time security alerts.
+- **PostgreSQL Persistence**: In parallel with Kafka streaming, critical audit logs are permanently persisted in the append-only `security_audit_logs` table for SOC2/ISO27001 compliance and forensic auditability.
+- **Auditing Schema**:
+  - `id`: Unique event uuid.
+  - `event_type`: "LOGIN_SUCCESS", "LOGIN_FAILURE", "SESSION_CONCURRENCY_REVOCATION", "API_KEY_CREATED", "API_KEY_REVOKED", "BRUTE_FORCE_LOCKOUT", etc.
+  - `severity`: "LOW", "MEDIUM", "HIGH", "CRITICAL".
+  - `user_id`, `session_id`, `api_key_id`: Relational links.
+  - `ip_address`, `user_agent`: Network identifiers.
+  - `details`, `metadata`: Payload details.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"velyxora/packages/database"
 	"velyxora/packages/types"
 )
 
@@ -147,7 +148,12 @@ func (or *OMSRouter) CancelOrder(orderID, ip, device string) error {
 	unfilledQty := order.Quantity - order.FilledQty
 	if unfilledQty > 0 {
 		if order.Side == "BUY" {
-			or.risk.ReleaseHold(order.UserID, "USDT", unfilledQty*order.Price)
+			makerRate, takerRate := or.execution.fees.GetFeeRates(order.UserID)
+			feeRate := takerRate
+			if order.PostOnly {
+				feeRate = makerRate
+			}
+			or.risk.ReleaseHold(order.UserID, "USDT", unfilledQty*order.Price*(1.0+feeRate))
 		} else {
 			or.risk.ReleaseHold(order.UserID, "BTC", unfilledQty)
 		}
@@ -199,4 +205,17 @@ func (or *OMSRouter) MassCancel(symbol, userID, ip, device string) int {
 // GetUserOrders queries user orders from the underlying state machine
 func (or *OMSRouter) GetUserOrders(userID string) []*AdvancedOrder {
 	return or.stateMachine.GetUserOrders(userID)
+}
+
+// GetOrder retrieves a single tracked advanced order
+func (or *OMSRouter) GetOrder(orderID string) (*AdvancedOrder, error) {
+	return or.stateMachine.GetOrder(orderID)
+}
+
+// SetDB dynamically configures database references for settlement and risk engines
+func (or *OMSRouter) SetDB(db *database.DB) {
+	or.mu.Lock()
+	defer or.mu.Unlock()
+	or.settlement.SetDB(db)
+	or.risk.SetDB(db)
 }
