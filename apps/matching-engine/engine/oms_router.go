@@ -219,3 +219,24 @@ func (or *OMSRouter) SetDB(db *database.DB) {
 	or.settlement.SetDB(db)
 	or.risk.SetDB(db)
 }
+
+// SetHaltStatus triggers global trading halts in the risk engine
+func (or *OMSRouter) SetHaltStatus(halted bool) {
+	or.mu.Lock()
+	defer or.mu.Unlock()
+	or.risk.SetHaltStatus(halted)
+}
+
+// BlockAccount blocks a user from trading in the risk engine
+func (or *OMSRouter) BlockAccount(userID string, blocked bool) {
+	or.mu.Lock()
+	defer or.mu.Unlock()
+	or.risk.BlockAccount(userID, blocked)
+}
+
+// SuspendMarket suspends trading for a specific symbol in the risk engine
+func (or *OMSRouter) SuspendMarket(symbol string, suspended bool) {
+	or.mu.Lock()
+	defer or.mu.Unlock()
+	or.risk.SuspendMarket(symbol, suspended)
+}

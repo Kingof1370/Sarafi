@@ -275,6 +275,8 @@ func handleHaltTrading(c *gin.Context) {
 	}
 	_ = c.ShouldBindJSON(&req)
 
+	globalOMSRouter.SetHaltStatus(req.Halt)
+
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Trading halt updated successfully",
 		"halt":    req.Halt,
@@ -296,6 +298,8 @@ func handleBlockUser(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "User ID required"})
 		return
 	}
+
+	globalOMSRouter.BlockAccount(req.UserID, req.Block)
 
 	c.JSON(http.StatusOK, gin.H{
 		"message": "User account blocklist status updated",
@@ -319,6 +323,8 @@ func handleSuspendMarket(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Symbol required"})
 		return
 	}
+
+	globalOMSRouter.SuspendMarket(req.Symbol, req.Suspend)
 
 	c.JSON(http.StatusOK, gin.H{
 		"message":   "Market suspend status updated",

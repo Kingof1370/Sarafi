@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"math"
 	"sync"
 )
 
@@ -132,7 +133,8 @@ func (fe *FeesEngine) CalculateFee(userID string, price, quantity float64, isMak
 	if isMaker {
 		rate = makerRate
 	}
-	return price * quantity * rate
+	fee := price * quantity * rate
+	return RoundToPrecision(fee, 8)
 }
 
 // ProcessCommission splits transaction fees into affiliate referral commissions and platform revenues
@@ -157,4 +159,13 @@ func (fe *FeesEngine) GetAccumulatedRevenue(asset string) float64 {
 	fe.mu.RLock()
 	defer fe.mu.RUnlock()
 	return fe.accumulatedFees[asset]
+}
+
+// RoundToPrecision mathematically rounds float value to specified decimal precision, avoiding binary floating point anomalies
+func RoundToPrecision(val float64, precision int) float64 {
+	if precision < 0 {
+		return val
+	}
+	shift := math.Pow(10, float64(precision))
+	return math.Round(val*shift) / shift
 }

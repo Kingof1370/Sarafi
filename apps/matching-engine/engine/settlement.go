@@ -148,8 +148,22 @@ func (se *SettlementEngine) executeSettlementTransaction(ctx context.Context, jo
 	}
 	defer tx.Rollback(ctx)
 
+	// Ensure safe execution/settlement idempotency (Rule 8)
+	var alreadySettled bool
+	err = tx.QueryRow(ctx,
+		"SELECT EXISTS(SELECT 1 FROM ledger_entries WHERE id = $1)",
+		"ent_b_q_"+exec.TradeID).Scan(&alreadySettled)
+	if err == nil && alreadySettled {
+		return nil
+	}
+
+	// Pre-round all execution variables to defined decimal precision (Rule 11 & 12)
+	buyerDebit := RoundToPrecision(exec.Price*exec.Quantity+exec.BuyerFee, 8)
+	sellerCredit := RoundToPrecision(exec.Price*exec.Quantity-exec.SellerFee, 8)
+	qty := RoundToPrecision(exec.Quantity, 8)
+	platformFee := RoundToPrecision(exec.BuyerFee+exec.SellerFee, 8)
+
 	// 1. Debit Buyer Quote Asset: Price * Quantity + BuyerFee (from Reserved)
-	buyerDebit := exec.Price*exec.Quantity + exec.BuyerFee
 	_, err = tx.Exec(ctx,
 		"UPDATE balances SET reserved = reserved - $1, total = total - $1, updated_at = NOW() WHERE user_id = $2 AND asset = $3",
 		buyerDebit, exec.BuyerID, job.QuoteAsset)
@@ -161,7 +175,7 @@ func (se *SettlementEngine) executeSettlementTransaction(ctx context.Context, jo
 	_, err = tx.Exec(ctx,
 		"INSERT INTO balances (user_id, asset, available, total, updated_at) VALUES ($1, $2, $3, $3, NOW()) "+
 			"ON CONFLICT (user_id, asset) DO UPDATE SET available = balances.available + EXCLUDED.available, total = balances.total + EXCLUDED.total, updated_at = NOW()",
-		exec.BuyerID, job.BaseAsset, exec.Quantity)
+		exec.BuyerID, job.BaseAsset, qty)
 	if err != nil {
 		return fmt.Errorf("failed to credit buyer base balance: %w", err)
 	}
@@ -169,13 +183,12 @@ func (se *SettlementEngine) executeSettlementTransaction(ctx context.Context, jo
 	// 3. Debit Seller Base Asset: Quantity (from Reserved)
 	_, err = tx.Exec(ctx,
 		"UPDATE balances SET reserved = reserved - $1, total = total - $1, updated_at = NOW() WHERE user_id = $2 AND asset = $3",
-		exec.Quantity, exec.SellerID, job.BaseAsset)
+		qty, exec.SellerID, job.BaseAsset)
 	if err != nil {
 		return fmt.Errorf("failed to debit seller base balance: %w", err)
 	}
 
 	// 4. Credit Seller Quote Asset: Price * Quantity - SellerFee
-	sellerCredit := exec.Price*exec.Quantity - exec.SellerFee
 	_, err = tx.Exec(ctx,
 		"INSERT INTO balances (user_id, asset, available, total, updated_at) VALUES ($1, $2, $3, $3, NOW()) "+
 			"ON CONFLICT (user_id, asset) DO UPDATE SET available = balances.available + EXCLUDED.available, total = balances.total + EXCLUDED.total, updated_at = NOW()",
@@ -189,7 +202,7 @@ func (se *SettlementEngine) executeSettlementTransaction(ctx context.Context, jo
 	_, err = tx.Exec(ctx,
 		"INSERT INTO balances (user_id, asset, available, total, updated_at) VALUES ($1, $2, $3, $3, NOW()) "+
 			"ON CONFLICT (user_id, asset) DO UPDATE SET available = balances.available + EXCLUDED.available, total = balances.total + EXCLUDED.total, updated_at = NOW()",
-		platformFeeAccount, job.QuoteAsset, exec.BuyerFee+exec.SellerFee)
+		platformFeeAccount, job.QuoteAsset, platformFee)
 	if err != nil {
 		return fmt.Errorf("failed to credit platform fee balance: %w", err)
 	}
