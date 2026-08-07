@@ -11,13 +11,14 @@ use (
 	./packages/connectivity
 	./packages/custody
 	./packages/database
-	./packages/monitoring
-	./packages/treasury
 	./packages/deposits
 	./packages/keys
 	./packages/ledger-common
 	./packages/logger
+	./packages/monitoring
+	./packages/recovery
 	./packages/security
+	./packages/treasury
 	./packages/types
 	./packages/wallet
 	./packages/withdrawals
