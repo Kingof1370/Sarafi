@@ -9,6 +9,7 @@ This manual details the production security updates introduced in our platform u
 * **Content-Security-Policy (CSP)**: Standard headers configured with `default-src 'self'` to completely avoid Cross-Site Scripting (XSS).
 * **CORS Policies**: Explicit origin mapping and headers validation rules.
 * **Rate Limiting Foundation**: Custom in-memory IP request counters designed to defend REST endpoints from denial of service attempts.
+* **Strict-Transport-Security (HSTS)**: Configured with `max-age=31536000; includeSubDomains; preload` to guarantee secure SSL/TLS communication.
 
 ---
 
