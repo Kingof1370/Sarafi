@@ -29,7 +29,7 @@ func TestJWTGenerationAndValidation(t *testing.T) {
 	userID := "user_uuid_1"
 	email := "user@example.com"
 
-	access, refresh, err := GenerateJWT(userID, email, secret, 15*time.Minute, 24*time.Hour)
+	access, refresh, err := GenerateJWT(userID, email, "sess_123", secret, 15*time.Minute, 24*time.Hour)
 	if err != nil {
 		t.Fatalf("JWT generation failed: %v", err)
 	}

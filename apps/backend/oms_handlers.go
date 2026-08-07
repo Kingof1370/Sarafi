@@ -34,38 +34,63 @@ func init() {
 func RegisterOMSHandlers(r *gin.RouterGroup) {
 	oms := r.Group("/oms")
 	{
-		oms.POST("/orders", handleCreateOrder)
-		oms.DELETE("/orders/:id", handleCancelOrder)
-		oms.POST("/orders/:id/replace", handleReplaceOrder)
-		oms.POST("/orders/cancel-bulk", handleBulkCancel)
-		oms.GET("/open", handleOpenOrders)
-		oms.GET("/history", handleOrderHistory)
-		oms.GET("/trades", handleGetMarketTrades)
+		// Trading endpoints (authenticated users with trading permission)
+		tradingGroup := oms.Group("")
+		tradingGroup.Use(RBACMiddleware("trading:write"))
+		{
+			tradingGroup.POST("/orders", handleCreateOrder)
+			tradingGroup.DELETE("/orders/:id", handleCancelOrder)
+			tradingGroup.POST("/orders/:id/replace", handleReplaceOrder)
+			tradingGroup.POST("/orders/cancel-bulk", handleBulkCancel)
+			tradingGroup.GET("/open", handleOpenOrders)
+			tradingGroup.GET("/history", handleOrderHistory)
+		}
 
-		// Risk & Admin APIs
-		oms.GET("/risk/status", handleGetRiskStatus)
-		oms.POST("/risk/halt", handleHaltTrading)
-		oms.POST("/risk/block", handleBlockUser)
-		oms.POST("/risk/suspend", handleSuspendMarket)
+		// Public/Authenticated general reading endpoints (wallet:read)
+		readGroup := oms.Group("")
+		readGroup.Use(RBACMiddleware("wallet:read"))
+		{
+			readGroup.GET("/trades", handleGetMarketTrades)
+			readGroup.GET("/fees/schedule", handleGetFeeSchedule)
+			readGroup.GET("/fees/vip", handleGetUserVIP)
+			readGroup.GET("/system/health", handleGetSystemHealth)
+			readGroup.GET("/risk/status", handleGetRiskStatus)
+		}
 
-		// Settlement & Clearing APIs
-		oms.GET("/settlements", handleGetSettlementsHistory)
-		oms.GET("/settlements/queue", handleGetSettlementsQueue)
-		oms.POST("/settlements/reprocess", handleReprocessSettlements)
+		// Support operations (support:read)
+		supportGroup := oms.Group("")
+		supportGroup.Use(RBACMiddleware("support:read"))
+		{
+			supportGroup.GET("/fees/revenue", handleGetRevenueSummary)
+			supportGroup.GET("/liquidity/stats", handleGetLiquidityStats)
+			supportGroup.GET("/surveillance/alerts", handleGetSurveillanceAlerts)
+		}
 
-		// Liquidity & Surveillance APIs
-		oms.GET("/liquidity/stats", handleGetLiquidityStats)
-		oms.GET("/surveillance/alerts", handleGetSurveillanceAlerts)
+		// Risk and compliance operations (risk:write)
+		riskGroup := oms.Group("")
+		riskGroup.Use(RBACMiddleware("risk:write"))
+		{
+			riskGroup.POST("/risk/halt", handleHaltTrading)
+			riskGroup.POST("/risk/block", handleBlockUser)
+			riskGroup.POST("/risk/suspend", handleSuspendMarket)
+			riskGroup.GET("/settlements", handleGetSettlementsHistory)
+			riskGroup.GET("/settlements/queue", handleGetSettlementsQueue)
+			riskGroup.POST("/settlements/reprocess", handleReprocessSettlements)
+		}
 
-		// Fee & Revenue APIs
-		oms.GET("/fees/schedule", handleGetFeeSchedule)
-		oms.GET("/fees/vip", handleGetUserVIP)
-		oms.GET("/fees/revenue", handleGetRevenueSummary)
+		// Administrative operations (system:admin)
+		adminGroup := oms.Group("")
+		adminGroup.Use(RBACMiddleware("system:admin"))
+		{
+			adminGroup.POST("/system/backup", handleTriggerBackup)
+		}
 
-		// Observability, Health, and Operations APIs
-		oms.GET("/system/health", handleGetSystemHealth)
-		oms.POST("/system/backup", handleTriggerBackup)
-		oms.POST("/system/recover", handleTriggerRecovery)
+		// Super admin operations (super:admin)
+		superGroup := oms.Group("")
+		superGroup.Use(RBACMiddleware("super:admin"))
+		{
+			superGroup.POST("/system/recover", handleTriggerRecovery)
+		}
 	}
 }
 
@@ -81,11 +106,30 @@ func handleGetSystemHealth(c *gin.Context) {
 
 func handleTriggerBackup(c *gin.Context) {
 	var req struct {
-		Type string `json:"type" binding:"required"`
+		Type    string `json:"type" binding:"required"`
+		MFACode string `json:"mfa_code"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Backup type required"})
 		return
+	}
+
+	claims, _ := c.Get("claims")
+	userClaims := claims.(*security.Claims)
+
+	// Verify MFA if enabled
+	if globalDB != nil {
+		var isMfaEnabled bool
+		var mfaSecret string
+		err := globalDB.Pool.QueryRow(context.Background(),
+			"SELECT is_mfa_enabled, mfa_secret FROM users WHERE id = $1", userClaims.UserID).
+			Scan(&isMfaEnabled, &mfaSecret)
+		if err == nil && isMfaEnabled && mfaSecret != "" {
+			if req.MFACode == "" || !security.ValidateTOTP(mfaSecret, req.MFACode) {
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "MFA verification failed: valid MFA code required to trigger backup"})
+				return
+			}
+		}
 	}
 
 	c.JSON(http.StatusAccepted, gin.H{
@@ -98,6 +142,32 @@ func handleTriggerBackup(c *gin.Context) {
 }
 
 func handleTriggerRecovery(c *gin.Context) {
+	var req struct {
+		MFACode string `json:"mfa_code" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "MFA code required for recovery operations"})
+		return
+	}
+
+	claims, _ := c.Get("claims")
+	userClaims := claims.(*security.Claims)
+
+	// Verify MFA if enabled
+	if globalDB != nil {
+		var isMfaEnabled bool
+		var mfaSecret string
+		err := globalDB.Pool.QueryRow(context.Background(),
+			"SELECT is_mfa_enabled, mfa_secret FROM users WHERE id = $1", userClaims.UserID).
+			Scan(&isMfaEnabled, &mfaSecret)
+		if err == nil && isMfaEnabled && mfaSecret != "" {
+			if !security.ValidateTOTP(mfaSecret, req.MFACode) {
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "MFA verification failed: valid MFA code required to trigger system recovery"})
+				return
+			}
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Disaster recovery journal replay completed successfully",
 		"status":  "SUCCESS",
