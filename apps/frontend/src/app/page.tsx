@@ -48,6 +48,17 @@ export default function Home() {
   const [orderHistory, setOrderHistory] = useState<AdvancedOrder[]>([]);
   const [ticker, setTicker] = useState({ lastPrice: 50000.0, high: 50200.0, low: 49800.0, vol: 120.5, spread: 0.1 });
 
+  // MFA-Specific States
+  const [mfaChallengeToken, setMfaChallengeToken] = useState<string | null>(null);
+  const [mfaChallengeCode, setMfaChallengeCode] = useState('');
+  const [mfaEnabled, setMfaEnabled] = useState(false);
+  const [mfaSecret, setMfaSecret] = useState('');
+  const [qrCodeUrl, setQrCodeUrl] = useState('');
+  const [backupCodes, setBackupCodes] = useState<string[]>([]);
+  const [verificationCode, setVerificationCode] = useState('');
+  const [disableCode, setDisableCode] = useState('');
+  const [showSetup, setShowShowSetup] = useState(false);
+
   const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
@@ -59,11 +70,98 @@ export default function Home() {
         setError('Registration successful! Please login.');
       } else {
         const res = await api.post('/auth/login', { email, password });
-        const { access_token } = res.data;
-        setAuth({ id: 'usr_logged_in', email }, access_token);
+        if (res.data.mfa_required) {
+          // MFA is enabled for this user. Enter intermediate challenge flow.
+          setMfaChallengeToken(res.data.mfa_token);
+          setError('');
+        } else {
+          // Standard login direct success
+          const { access_token } = res.data;
+          setAuth({ id: 'usr_logged_in', email }, access_token);
+        }
       }
     } catch (err: any) {
       setError(err.response?.data?.error || 'Authentication action failed');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleMFAChallengeVerify = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    setError('');
+    try {
+      const res = await api.post('/auth/mfa-verify', {
+        mfa_token: mfaChallengeToken,
+        totp_code: mfaChallengeCode,
+      });
+      const { access_token } = res.data;
+      setAuth({ id: 'usr_logged_in', email }, access_token);
+      setMfaChallengeToken(null);
+      setMfaChallengeCode('');
+    } catch (err: any) {
+      setError(err.response?.data?.error || 'Multi-Factor verification failed');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchMFAStatus = useCallback(async () => {
+    if (!accessToken) return;
+    try {
+      const res = await api.get('/mfa/status');
+      setMfaEnabled(res.data.is_mfa_enabled);
+    } catch (err) {
+      console.error('Failed to fetch MFA status', err);
+    }
+  }, [accessToken]);
+
+  const initiateMFAEnable = async () => {
+    setError('');
+    try {
+      const res = await api.post('/mfa/enable');
+      setMfaSecret(res.data.mfa_secret);
+      setQrCodeUrl(res.data.qr_code_url);
+      setBackupCodes(res.data.backup_codes || []);
+      setShowShowSetup(true);
+    } catch (err: any) {
+      setError(err.response?.data?.error || 'Failed to initiate MFA configuration');
+    }
+  };
+
+  const finalizeMFAEnable = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    setLoading(true);
+    try {
+      await api.post('/mfa/verify', { totp_code: verificationCode });
+      setMfaEnabled(true);
+      setShowShowSetup(false);
+      setVerificationCode('');
+      setMfaSecret('');
+      setQrCodeUrl('');
+      setError('MFA Activated successfully! Please store your backup codes safely.');
+      fetchMFAStatus();
+    } catch (err: any) {
+      setError(err.response?.data?.error || 'Invalid verification token. Enrollment failed.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const disableMFA = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    setLoading(true);
+    try {
+      await api.post('/mfa/disable', { totp_code: disableCode });
+      setMfaEnabled(false);
+      setDisableCode('');
+      setError('MFA disabled successfully.');
+      fetchMFAStatus();
+    } catch (err: any) {
+      setError(err.response?.data?.error || 'Failed to disable MFA protection');
     } finally {
       setLoading(false);
     }
@@ -137,11 +235,12 @@ export default function Home() {
 
   useEffect(() => {
     if (accessToken) {
+      fetchMFAStatus();
       fetchOrders();
       const interval = setInterval(fetchOrders, 3000);
       return () => clearInterval(interval);
     }
-  }, [accessToken, fetchOrders]);
+  }, [accessToken, fetchMFAStatus, fetchOrders]);
 
   // Derived financial estimations
   const totalCost = parseFloat(price) * parseFloat(quantity);
@@ -192,37 +291,82 @@ export default function Home() {
         <section className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-xl flex flex-col justify-between">
           {!accessToken ? (
             <div>
-              <h2 className="text-lg font-bold mb-4 text-cyan-400">Vault Access Control</h2>
-              <form onSubmit={handleAuth} className="space-y-4">
+              {mfaChallengeToken ? (
+                // MFA Challenge Authentication Box
                 <div>
-                  <label className="block text-xs font-semibold text-slate-400 mb-2">Corporate Email</label>
-                  <input
-                    type="email"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-100 text-xs focus:outline-none focus:border-cyan-500"
-                    placeholder="user@velyxora.com"
-                    required
-                  />
+                  <h2 className="text-lg font-bold mb-4 text-cyan-400 flex items-center gap-2">
+                    🔒 Security Verification
+                  </h2>
+                  <form onSubmit={handleMFAChallengeVerify} className="space-y-4">
+                    <p className="text-xs text-slate-400">
+                      Multi-Factor Authentication is active on your account. Please input your standard 6-digit authenticator token or backup recovery code to finalize registration.
+                    </p>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-400 mb-2">Authenticator Code</label>
+                      <input
+                        type="text"
+                        value={mfaChallengeCode}
+                        onChange={(e) => setMfaChallengeCode(e.target.value)}
+                        className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-100 text-center tracking-widest text-sm font-bold focus:outline-none focus:border-cyan-500"
+                        placeholder="000000"
+                        maxLength={9}
+                        required
+                        autoFocus
+                      />
+                    </div>
+                    {error && <p className="text-xs text-amber-400 font-semibold">{error}</p>}
+                    <div className="flex gap-2">
+                      <button type="submit" className="flex-1 py-2.5 bg-cyan-500 text-slate-950 font-bold rounded-lg text-xs hover:bg-cyan-400">
+                        Verify & Login
+                      </button>
+                      <button type="button" onClick={() => setMfaChallengeToken(null)} className="px-3 py-2.5 bg-slate-950 border border-slate-800 rounded-lg text-slate-300 text-xs hover:bg-slate-900">
+                        Back
+                      </button>
+                    </div>
+                  </form>
                 </div>
+              ) : (
+                // Standard register/login panel
                 <div>
-                  <label className="block text-xs font-semibold text-slate-400 mb-2">Security Passphrase</label>
-                  <input
-                    type="password"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-100 text-xs focus:outline-none focus:border-cyan-500"
-                    placeholder="••••••••"
-                    required
-                  />
+                  <h2 className="text-lg font-bold mb-4 text-cyan-400">Vault Access Control</h2>
+                  <form onSubmit={handleAuth} className="space-y-4">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-400 mb-2">Corporate Email</label>
+                      <input
+                        type="email"
+                        value={email}
+                        onChange={(e) => setEmail(e.target.value)}
+                        className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-100 text-xs focus:outline-none focus:border-cyan-500"
+                        placeholder="user@velyxora.com"
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-400 mb-2">Security Passphrase</label>
+                      <input
+                        type="password"
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-100 text-xs focus:outline-none focus:border-cyan-500"
+                        placeholder="••••••••"
+                        required
+                      />
+                    </div>
+                    {error && <p className="text-xs text-amber-400 font-semibold">{error}</p>}
+                    <button type="submit" className="w-full py-2.5 bg-cyan-500 text-slate-950 font-bold rounded-lg text-xs hover:bg-cyan-400">
+                      {isRegister ? 'Register' : 'Authenticate'}
+                    </button>
+                    <div className="text-center mt-3">
+                      <button type="button" onClick={() => setIsRegister(!isRegister)} className="text-xs text-cyan-400 hover:underline">
+                        {isRegister ? 'Already have an account? Sign In' : 'Create new corporate profile'}
+                      </button>
+                    </div>
+                  </form>
                 </div>
-                {error && <p className="text-xs text-amber-400 font-semibold">{error}</p>}
-                <button type="submit" className="w-full py-2.5 bg-cyan-500 text-slate-950 font-bold rounded-lg text-xs hover:bg-cyan-400">
-                  {isRegister ? 'Register' : 'Authenticate'}
-                </button>
-              </form>
+              )}
             </div>
           ) : (
+            // Authenticated order form
             <form onSubmit={placeOrder} className="space-y-4">
               <h2 className="text-base font-bold text-cyan-400">Order Placement leg</h2>
               <div className="grid grid-cols-2 gap-2">
@@ -431,6 +575,121 @@ export default function Home() {
           </div>
         </section>
       </div>
+
+      {/* Advanced Security & MFA Configuration Segment */}
+      {accessToken && (
+        <section className="max-w-7xl mx-auto bg-slate-900 border border-slate-800 rounded-xl p-5 mt-6 shadow-xl">
+          <h3 className="text-base font-bold text-cyan-400 border-b border-slate-800 pb-3 mb-4 flex items-center gap-2">
+            🛡️ Corporate Account Security & Multi-Factor Controls
+          </h3>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div>
+              <p className="text-xs text-slate-400 leading-relaxed mb-4">
+                Enforcing strong multi-factor authentication (MFA/TOTP) protects your digital asset custody wallets and trading actions from unauthorized key access.
+              </p>
+              <div className="bg-slate-950 p-4 rounded-lg border border-slate-800 flex items-center justify-between">
+                <div>
+                  <span className="text-[10px] text-slate-500 block uppercase font-bold">MFA Protection Level</span>
+                  <span className={`text-sm font-bold block mt-1 ${mfaEnabled ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    {mfaEnabled ? '✅ HIGHLY SECURED (TOTP ACTIVE)' : '⚠️ UNSECURED (PASSWORD ONLY)'}
+                  </span>
+                </div>
+                {!mfaEnabled ? (
+                  <button onClick={initiateMFAEnable} className="px-4 py-2 bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold rounded-lg text-xs transition">
+                    Configure MFA
+                  </button>
+                ) : (
+                  <div className="text-slate-500 text-xs font-medium">Protected</div>
+                )}
+              </div>
+
+              {mfaEnabled && (
+                <form onSubmit={disableMFA} className="mt-4 p-4 bg-slate-950 rounded-lg border border-slate-800 space-y-3">
+                  <h4 className="text-xs font-bold text-rose-400">Deactivate MFA Protection</h4>
+                  <p className="text-[11px] text-slate-500">
+                    To deactivate MFA, input your standard 6-digit verification code or recovery backup code below:
+                  </p>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={disableCode}
+                      onChange={(e) => setDisableCode(e.target.value)}
+                      placeholder="000000"
+                      className="px-3 py-1.5 bg-slate-900 border border-slate-800 rounded text-slate-100 text-xs w-28 focus:outline-none"
+                    />
+                    <button type="submit" className="px-4 py-1.5 bg-rose-900/60 border border-rose-800 text-rose-300 hover:bg-rose-900 text-xs rounded font-bold">
+                      Disable MFA
+                    </button>
+                  </div>
+                </form>
+              )}
+            </div>
+
+            {/* MFA Setup enrollment workflow panel */}
+            <div>
+              {showSetup ? (
+                <form onSubmit={finalizeMFAEnable} className="p-4 bg-slate-950 rounded-lg border border-cyan-800/40 space-y-4">
+                  <h4 className="text-xs font-bold text-cyan-400 uppercase tracking-wider">Configure Google Authenticator / Duo</h4>
+                  <ol className="list-decimal list-inside text-[11px] text-slate-400 space-y-2">
+                    <li>Scan this simulated secure QR block using your mobile authenticator:</li>
+                    <div className="my-3 p-3 bg-slate-900 border border-slate-800 rounded-lg flex flex-col items-center gap-2">
+                      {/* Interactive visually complete QR rendering block */}
+                      <div className="w-32 h-32 bg-slate-100 flex items-center justify-center p-2 rounded-lg border border-slate-300">
+                        <div className="w-full h-full bg-slate-950 flex flex-wrap p-2 gap-0.5">
+                          {Array.from({ length: 144 }).map((_, i) => (
+                            <div key={i} className={`w-2 h-2 ${((i * 17) % 7 === 0 || (i % 9 === 0)) ? 'bg-slate-100' : 'bg-slate-950'}`} />
+                          ))}
+                        </div>
+                      </div>
+                      <span className="text-[10px] text-slate-500 break-all max-w-[250px] text-center font-mono">
+                        {qrCodeUrl}
+                      </span>
+                    </div>
+                    <li>Or manually input the secret code:</li>
+                    <div className="p-2 bg-slate-900 border border-slate-800 rounded font-mono text-xs text-center text-cyan-300 font-bold select-all">
+                      {mfaSecret}
+                    </div>
+                    <li className="text-rose-400 font-bold">Store these 8 Backup Recovery Codes safely. You can use them to recover your account if you lose your phone:</li>
+                    <div className="grid grid-cols-2 gap-2 font-mono text-[10px] text-slate-300 bg-slate-900 p-2.5 rounded border border-slate-800">
+                      {backupCodes.map((code, idx) => (
+                        <div key={idx} className="flex gap-2">
+                          <span className="text-slate-500">{idx+1}.</span>
+                          <span>{code}</span>
+                        </div>
+                      ))}
+                    </div>
+                    <li>Input the 6-digit standard token generated by your device to finalize activation:</li>
+                  </ol>
+
+                  <div className="flex gap-2 pt-2">
+                    <input
+                      type="text"
+                      value={verificationCode}
+                      onChange={(e) => setVerificationCode(e.target.value)}
+                      placeholder="000000"
+                      className="px-3 py-2 bg-slate-900 border border-slate-800 rounded text-slate-100 text-xs w-28 text-center font-bold focus:outline-none"
+                    />
+                    <button type="submit" className="flex-1 py-2 bg-cyan-500 text-slate-950 font-bold rounded text-xs hover:bg-cyan-400 transition">
+                      Confirm Activation
+                    </button>
+                    <button type="button" onClick={() => setShowShowSetup(false)} className="px-3 py-2 bg-slate-900 border border-slate-800 rounded text-slate-400 text-xs hover:bg-slate-850">
+                      Cancel
+                    </button>
+                  </div>
+                </form>
+              ) : (
+                <div className="p-6 bg-slate-950/40 border border-slate-800/60 rounded-xl text-center flex flex-col items-center justify-center min-h-[220px]">
+                  <span className="text-2xl mb-2">🔒</span>
+                  <span className="text-xs text-slate-400 font-semibold mb-1">MFA Enrollment Terminal</span>
+                  <p className="text-[10px] text-slate-500 max-w-xs leading-relaxed">
+                    Click &quot;Configure MFA&quot; to trigger secret generation, QR codes, and recover codes.
+                  </p>
+                </div>
+              )}
+            </div>
+          </div>
+        </section>
+      )}
 
       {/* Lower Dashboard: Open & Historical Orders */}
       {accessToken && (

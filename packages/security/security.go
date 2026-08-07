@@ -23,6 +23,11 @@ func CheckPasswordHash(password, hash string) bool {
 	return err == nil
 }
 
+// CompareBcrypt performs a standard bcrypt hash comparison, returning the error
+func CompareBcrypt(hash, password string) error {
+	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
+}
+
 // Claims represents JWT payload structure
 type Claims struct {
 	UserID string `json:"user_id"`
