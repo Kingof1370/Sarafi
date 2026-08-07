@@ -4,10 +4,23 @@ use (
 	./apps/backend
 	./apps/matching-engine
 	./apps/wallet-service
+	./packages/address
+	./packages/assets
+	./packages/blockchain
 	./packages/common
+	./packages/connectivity
+	./packages/custody
 	./packages/database
+	./packages/deposits
+	./packages/keys
+	./packages/ledger-common
 	./packages/logger
+	./packages/monitoring
+	./packages/recovery
 	./packages/security
+	./packages/treasury
 	./packages/types
+	./packages/wallet
+	./packages/withdrawals
 	./tests
 )

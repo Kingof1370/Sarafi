@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/signal"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -15,175 +14,53 @@ import (
 	"velyxora/packages/database"
 	"velyxora/packages/logger"
 	"velyxora/packages/types"
+
+	"velyxora/packages/wallet"
 )
 
+// Legacy BalanceEngine Wrapper for Main CLI and Kafka Loops compatibility
 type BalanceEngine struct {
-	mu       sync.Mutex
-	balances map[string]*types.Balance // key: "userID_asset"
-	ledger   []*types.LedgerEntry
-	db       *database.DB
+	pService *wallet.PersistentWalletService
+	balances map[string]*types.Balance // Legacy reference structure
 }
 
 func NewBalanceEngine(db *database.DB) *BalanceEngine {
+	log := logger.NewLogger(logger.Config{Level: "INFO", Format: "JSON", ServiceName: "legacy-reconciler"})
+	pService := wallet.NewPersistentWalletService(db, nil, log)
+	_ = pService.Bootstrap(context.Background())
+
 	return &BalanceEngine{
+		pService: pService,
 		balances: make(map[string]*types.Balance),
-		ledger:   make([]*types.LedgerEntry, 0),
-		db:       db,
 	}
 }
 
-// ProcessDoubleEntry forces absolute balance matches to ledger debits/credits to enforce financial safety
 func (be *BalanceEngine) ProcessDoubleEntry(ctx context.Context, txID string, debitUser, creditUser string, asset string, amount float64, description string) error {
-	// If PostgreSQL database connection pool is available, use real transactional SQL persistence
-	if be.db != nil {
-		tx, err := be.db.Pool.Begin(ctx)
-		if err != nil {
-			return fmt.Errorf("failed to begin ledger transaction: %w", err)
-		}
-		defer tx.Rollback(ctx)
-
-		// Helper to fetch and lock or insert initial balance
-		getAndLockBalance := func(userID, ast string) (*types.Balance, error) {
-			var bal types.Balance
-			err := tx.QueryRow(ctx,
-				"SELECT user_id, asset, available, locked, pending, reserved, total FROM balances WHERE user_id = $1 AND asset = $2 FOR UPDATE",
-				userID, ast).Scan(&bal.UserID, &bal.Asset, &bal.Available, &bal.Locked, &bal.Pending, &bal.Reserved, &bal.Total)
-
-			if err != nil {
-				// Row does not exist, initialize a new default balance row for the user
-				initialAvailable := 1000.0 // Default onboarding mock balance
-				_, errInsert := tx.Exec(ctx,
-					"INSERT INTO balances (user_id, asset, available, locked, pending, reserved, total) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-					userID, ast, initialAvailable, 0.0, 0.0, 0.0, initialAvailable)
-				if errInsert != nil {
-					return nil, fmt.Errorf("failed to insert initial balance: %w", errInsert)
-				}
-				bal = types.Balance{
-					UserID:    userID,
-					Asset:     ast,
-					Available: initialAvailable,
-					Total:     initialAvailable,
-				}
-			}
-			return &bal, nil
-		}
-
-		// Fetch and lock both balances
-		debitBal, err := getAndLockBalance(debitUser, asset)
-		if err != nil {
-			return err
-		}
-
-		creditBal, err := getAndLockBalance(creditUser, asset)
-		if err != nil {
-			return err
-		}
-
-		// Enforce safety constraints
-		if debitBal.Available < amount {
-			return fmt.Errorf("insufficient available balance: user %s has %f, requested %f", debitUser, debitBal.Available, amount)
-		}
-
-		// Settle and update balances
-		debitBal.Available -= amount
-		debitBal.Total -= amount
-
-		creditBal.Available += amount
-		creditBal.Total += amount
-
-		_, err = tx.Exec(ctx,
-			"UPDATE balances SET available = $1, total = $2, updated_at = NOW() WHERE user_id = $3 AND asset = $4",
-			debitBal.Available, debitBal.Total, debitUser, asset)
-		if err != nil {
-			return fmt.Errorf("failed to update debit user balance: %w", err)
-		}
-
-		_, err = tx.Exec(ctx,
-			"UPDATE balances SET available = $1, total = $2, updated_at = NOW() WHERE user_id = $3 AND asset = $4",
-			creditBal.Available, creditBal.Total, creditUser, asset)
-		if err != nil {
-			return fmt.Errorf("failed to update credit user balance: %w", err)
-		}
-
-		// Generate Ledger Entries
-		debitEntryID := fmt.Sprintf("ent_deb_%d", time.Now().UnixNano())
-		_, err = tx.Exec(ctx,
-			"INSERT INTO ledger_entries (id, ledger_tx_id, user_id, asset, type, amount, description, timestamp) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())",
-			debitEntryID, txID, debitUser, asset, string(types.Debit), amount, description)
-		if err != nil {
-			return fmt.Errorf("failed to write debit ledger entry: %w", err)
-		}
-
-		creditEntryID := fmt.Sprintf("ent_cred_%d", time.Now().UnixNano())
-		_, err = tx.Exec(ctx,
-			"INSERT INTO ledger_entries (id, ledger_tx_id, user_id, asset, type, amount, description, timestamp) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())",
-			creditEntryID, txID, creditUser, asset, string(types.Credit), amount, description)
-		if err != nil {
-			return fmt.Errorf("failed to write credit ledger entry: %w", err)
-		}
-
-		// Commit complete atomic settlement
-		if err := tx.Commit(ctx); err != nil {
-			return fmt.Errorf("failed to commit ledger transaction: %w", err)
-		}
-		return nil
+	err := be.pService.ProcessDoubleEntry(ctx, txID, debitUser, creditUser, asset, amount, description)
+	if err != nil {
+		return err
 	}
-
-	// Dynamic Fallback to local thread-safe memory storage if the Postgres database is absent/offline
-	be.mu.Lock()
-	defer be.mu.Unlock()
 
 	debitKey := debitUser + "_" + asset
 	creditKey := creditUser + "_" + asset
 
-	// Fetch or initialize
-	debitBal, ok := be.balances[debitKey]
-	if !ok {
-		debitBal = &types.Balance{UserID: debitUser, Asset: asset, Available: 1000.0, Total: 1000.0}
-		be.balances[debitKey] = debitBal
+	wDebit, _ := be.pService.GetWalletMgr().GetWallet("wal_hot_" + debitUser)
+	wCredit, _ := be.pService.GetWalletMgr().GetWallet("wal_hot_" + creditUser)
+
+	be.balances[debitKey] = &types.Balance{
+		UserID:    debitUser,
+		Asset:     asset,
+		Available: wDebit.Balances[asset].Available,
+		Total:     wDebit.Balances[asset].Total,
 	}
 
-	creditBal, ok := be.balances[creditKey]
-	if !ok {
-		creditBal = &types.Balance{UserID: creditUser, Asset: asset, Available: 1000.0, Total: 1000.0}
-		be.balances[creditKey] = creditBal
+	be.balances[creditKey] = &types.Balance{
+		UserID:    creditUser,
+		Asset:     asset,
+		Available: wCredit.Balances[asset].Available,
+		Total:     wCredit.Balances[asset].Total,
 	}
 
-	// Enforce balance restrictions (prevent negative balances)
-	if debitBal.Available < amount {
-		return fmt.Errorf("insufficient available balance: user %s has %f, requested %f", debitUser, debitBal.Available, amount)
-	}
-
-	// Calculate and Settle
-	debitBal.Available -= amount
-	debitBal.Total -= amount
-
-	creditBal.Available += amount
-	creditBal.Total += amount
-
-	debitEntry := &types.LedgerEntry{
-		ID:          fmt.Sprintf("ent_deb_%d", time.Now().UnixNano()),
-		LedgerTxID:  txID,
-		UserID:      debitUser,
-		Asset:       asset,
-		Type:        types.Debit,
-		Amount:      amount,
-		Description: description,
-		Timestamp:   time.Now(),
-	}
-
-	creditEntry := &types.LedgerEntry{
-		ID:          fmt.Sprintf("ent_cred_%d", time.Now().UnixNano()),
-		LedgerTxID:  txID,
-		UserID:      creditUser,
-		Asset:       asset,
-		Type:        types.Credit,
-		Amount:      amount,
-		Description: description,
-		Timestamp:   time.Now(),
-	}
-
-	be.ledger = append(be.ledger, debitEntry, creditEntry)
 	return nil
 }
 
@@ -222,7 +99,9 @@ func main() {
 		defer db.Close()
 	}
 
-	be := NewBalanceEngine(db)
+	// Initialize with active Kafka Producer
+	pws := wallet.NewPersistentWalletService(db, producer, log)
+	_ = pws.Bootstrap(context.Background())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -264,14 +143,14 @@ func main() {
 
 			// Settle Buyer Debit (USDT) -> Credit Seller (USDT)
 			txID := "tx_ld_" + fmt.Sprintf("%d", time.Now().UnixNano())
-			err = be.ProcessDoubleEntry(ctx, txID, trade.BuyerID, trade.SellerID, quoteAsset, quoteAmount, fmt.Sprintf("Settled trade purchase: %s", trade.ID))
+			err = pws.ProcessDoubleEntry(ctx, txID, trade.BuyerID, trade.SellerID, quoteAsset, quoteAmount, fmt.Sprintf("Settled trade purchase: %s", trade.ID))
 			if err != nil {
 				log.Error("Failed to settle Quote ledger transfer", "err", err)
 				return nil
 			}
 
 			// Settle Seller Debit (BTC) -> Credit Buyer (BTC)
-			err = be.ProcessDoubleEntry(ctx, txID, trade.SellerID, trade.BuyerID, baseAsset, trade.Quantity, fmt.Sprintf("Settled trade delivery: %s", trade.ID))
+			err = pws.ProcessDoubleEntry(ctx, txID, trade.SellerID, trade.BuyerID, baseAsset, trade.Quantity, fmt.Sprintf("Settled trade delivery: %s", trade.ID))
 			if err != nil {
 				log.Error("Failed to settle Base ledger transfer", "err", err)
 				return nil

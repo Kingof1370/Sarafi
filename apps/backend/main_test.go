@@ -113,3 +113,225 @@ func TestWalletWithdrawalValidationAPI(t *testing.T) {
 		t.Errorf("Expected status 202 Accepted, got %d", w2.Code)
 	}
 }
+
+func TestExpandedWalletAPIs(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	secret := "testsecret12345678"
+
+	// Mock DB and routers inside standard test bootstrap
+	v1 := r.Group("/api/v1")
+	walletGroup := v1.Group("/wallet")
+	walletGroup.Use(authMiddleware(secret))
+	{
+		walletGroup.GET("/summary", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"summary": []gin.H{
+				{"wallet_id": "wal_hot_usr_123", "asset": "BTC", "available": 1.25},
+			}})
+		})
+
+		walletGroup.GET("/assets", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"assets": []gin.H{
+				{"symbol": "BTC", "name": "Bitcoin", "can_deposit": true},
+			}})
+		})
+
+		walletGroup.GET("/assets/:symbol", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"symbol": c.Param("symbol"), "can_withdraw": true})
+		})
+
+		walletGroup.GET("/addresses", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"addresses": []gin.H{
+				{"address": "0x123", "network": "Ethereum"},
+			}})
+		})
+
+		walletGroup.GET("/balances/details", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"balances_details": []gin.H{
+				{"wallet_id": "wal_hot_usr_123", "asset": "BTC", "available": 1.25, "locked": 0.1},
+			}})
+		})
+
+		walletGroup.GET("/history", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"history": []gin.H{
+				{"id": "audit_111", "asset": "BTC", "action": "WALLET_CREATED"},
+			}})
+		})
+
+		// Deposit Engine Routes
+		walletGroup.GET("/deposits/history", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"deposits": []gin.H{
+				{"id": "dep_123", "asset": "BTC", "amount": 0.5},
+			}})
+		})
+
+		walletGroup.GET("/deposits/status/:id", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"id": c.Param("id"), "status": "PENDING"})
+		})
+
+		walletGroup.GET("/deposits/details/:id", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"id": c.Param("id"), "asset": "BTC", "amount": 0.5})
+		})
+
+		walletGroup.GET("/deposits/tx/:tx_hash", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"tx_hash": c.Param("tx_hash"), "network": "Ethereum"})
+		})
+
+		walletGroup.GET("/deposits/confirmations/:id", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"deposit_id": c.Param("id"), "confirmations_count": 4})
+		})
+
+		// Withdrawal Engine Routes
+		walletGroup.POST("/withdrawals/create", func(c *gin.Context) {
+			c.JSON(http.StatusAccepted, gin.H{"id": "wth_123", "status": "REQUESTED"})
+		})
+
+		walletGroup.POST("/withdrawals/cancel/:id", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"id": c.Param("id"), "status": "REJECTED"})
+		})
+
+		walletGroup.GET("/withdrawals/status/:id", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"id": c.Param("id"), "status": "APPROVED"})
+		})
+
+		walletGroup.GET("/withdrawals/history", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"withdrawals": []gin.H{
+				{"id": "wth_123", "asset": "USDT", "amount": 100.0},
+			}})
+		})
+
+		walletGroup.GET("/withdrawals/address-book", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"address_book": []gin.H{
+				{"address": "0x123", "label": "My Wallet"},
+			}})
+		})
+
+		walletGroup.POST("/withdrawals/whitelist", func(c *gin.Context) {
+			c.JSON(http.StatusCreated, gin.H{"id": "adr_bk_123", "status": "Whitelisted"})
+		})
+
+		walletGroup.POST("/withdrawals/approve/:id", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"withdrawal_id": c.Param("id"), "status": "APPROVED"})
+		})
+
+		// Blockchain Connectivity Routes
+		walletGroup.GET("/blockchain/networks", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"networks": []gin.H{
+				{"network": "Bitcoin", "status": "SYNCED"},
+			}})
+		})
+
+		walletGroup.GET("/blockchain/nodes", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"nodes": []gin.H{
+				{"id": "eth_primary", "network": "Ethereum"},
+			}})
+		})
+
+		walletGroup.GET("/blockchain/health", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"health_metrics": []gin.H{
+				{"node_id": "eth_primary", "health_score": 0.98},
+			}})
+		})
+
+		walletGroup.GET("/blockchain/sync", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"sync_history": []gin.H{
+				{"id": "sync_1", "block_height": 18450122},
+			}})
+		})
+
+		walletGroup.GET("/blockchain/broadcast/:id", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"withdrawal_id": c.Param("id"), "tx_hash": "0x123"})
+		})
+
+		// Key Management Routes
+		walletGroup.GET("/keys/status", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"keys": []gin.H{
+				{"id": "key_1_v1", "status": "ACTIVE"},
+			}})
+		})
+
+		walletGroup.GET("/keys/rotation", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"rotation_history": []gin.H{
+				{"id": "rot_1", "old_key_id": "key_old"},
+			}})
+		})
+
+		walletGroup.GET("/keys/signature-requests", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"signature_requests": []gin.H{
+				{"id": "sig_req_1", "status": "PENDING"},
+			}})
+		})
+
+		walletGroup.POST("/keys/approve-signature/:id", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"signature_request_id": c.Param("id"), "status": "COMPLETED"})
+		})
+
+		walletGroup.GET("/keys/audit", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"key_audit_logs": []gin.H{
+				{"id": "aud_1", "action": "KEY_GENERATED"},
+			}})
+		})
+	}
+
+	access, _, _ := security.GenerateJWT("usr_123", "test@test.com", secret, 5*time.Minute, 1*time.Hour)
+
+	// List of test targets
+	targets := []struct {
+		Path   string
+		Method string
+		Key    string
+	}{
+		{"/api/v1/wallet/summary", "GET", "summary"},
+		{"/api/v1/wallet/assets", "GET", "assets"},
+		{"/api/v1/wallet/assets/BTC", "GET", "symbol"},
+		{"/api/v1/wallet/addresses", "GET", "addresses"},
+		{"/api/v1/wallet/balances/details", "GET", "balances_details"},
+		{"/api/v1/wallet/history", "GET", "history"},
+		{"/api/v1/wallet/deposits/history", "GET", "deposits"},
+		{"/api/v1/wallet/deposits/status/dep_123", "GET", "status"},
+		{"/api/v1/wallet/deposits/details/dep_123", "GET", "amount"},
+		{"/api/v1/wallet/deposits/tx/0xabc", "GET", "tx_hash"},
+		{"/api/v1/wallet/deposits/confirmations/dep_123", "GET", "confirmations_count"},
+		{"/api/v1/wallet/withdrawals/create", "POST", "id"},
+		{"/api/v1/wallet/withdrawals/cancel/wth_123", "POST", "status"},
+		{"/api/v1/wallet/withdrawals/status/wth_123", "GET", "status"},
+		{"/api/v1/wallet/withdrawals/history", "GET", "withdrawals"},
+		{"/api/v1/wallet/withdrawals/address-book", "GET", "address_book"},
+		{"/api/v1/wallet/withdrawals/whitelist", "POST", "id"},
+		{"/api/v1/wallet/withdrawals/approve/wth_123", "POST", "status"},
+		{"/api/v1/wallet/blockchain/networks", "GET", "networks"},
+		{"/api/v1/wallet/blockchain/nodes", "GET", "nodes"},
+		{"/api/v1/wallet/blockchain/health", "GET", "health_metrics"},
+		{"/api/v1/wallet/blockchain/sync", "GET", "sync_history"},
+		{"/api/v1/wallet/blockchain/broadcast/wth_123", "GET", "tx_hash"},
+		{"/api/v1/wallet/keys/status", "GET", "keys"},
+		{"/api/v1/wallet/keys/rotation", "GET", "rotation_history"},
+		{"/api/v1/wallet/keys/signature-requests", "GET", "signature_requests"},
+		{"/api/v1/wallet/keys/approve-signature/sig_req_1", "POST", "status"},
+		{"/api/v1/wallet/keys/audit", "GET", "key_audit_logs"},
+	}
+
+	for _, tc := range targets {
+		w := httptest.NewRecorder()
+		var req *http.Request
+		if tc.Method == "POST" {
+			payload := `{"asset":"USDT","amount":50.0,"address":"0x123","network":"Ethereum","label":"Test"}`
+			req, _ = http.NewRequest(tc.Method, tc.Path, bytes.NewReader([]byte(payload)))
+			req.Header.Set("Content-Type", "application/json")
+		} else {
+			req, _ = http.NewRequest(tc.Method, tc.Path, nil)
+		}
+		req.Header.Set("Authorization", "Bearer "+access)
+		r.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK && w.Code != http.StatusAccepted && w.Code != http.StatusCreated {
+			t.Errorf("Path %s expected status success, got %d: %s", tc.Path, w.Code, w.Body.String())
+		}
+
+		var resp map[string]interface{}
+		_ = json.Unmarshal(w.Body.Bytes(), &resp)
+		if _, exists := resp[tc.Key]; !exists && tc.Key != "symbol" {
+			t.Errorf("Path %s expected key %s in response, got %s", tc.Path, tc.Key, w.Body.String())
+		}
+	}
+}

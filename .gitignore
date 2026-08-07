@@ -1,0 +1,12 @@
+# Velyxora Exchange compiled binaries
+backend
+matching-engine
+wallet-service
+*.exe
+*.test
+*.prof
+__debug_bin
+.env
+node_modules
+dist
+build
