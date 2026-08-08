@@ -5,6 +5,7 @@ use (
 	./apps/matching-engine
 	./apps/wallet-service
 	./packages/common
+	./packages/custody
 	./packages/database
 	./packages/logger
 	./packages/security

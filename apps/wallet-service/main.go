@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"velyxora/packages/common"
+	"velyxora/packages/custody"
 	"velyxora/packages/database"
 	"velyxora/packages/logger"
 	"velyxora/packages/types"
@@ -226,6 +227,17 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Initialize CustodyEngine and WalletWorkerOrchestrator
+	ce := custody.NewCustodyEngine(db)
+	orchestrator := NewWalletWorkerOrchestrator(db, producer, ce, log)
+
+	var wg sync.WaitGroup
+	orchestrator.StartWorkers(ctx, &wg)
+
+	// Initialize and run five-layer reconciliation engine scheduler (runs every 10 seconds)
+	reconciliationEngine := NewReconciliationEngine(db, ce, log)
+	reconciliationEngine.StartReconciliationScheduler(ctx, &wg, 10*time.Second)
 
 	// Handle Graceful Shutdown Signals
 	sigChan := make(chan os.Signal, 1)

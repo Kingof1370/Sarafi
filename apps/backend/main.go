@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"os"
@@ -13,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"velyxora/packages/common"
+	"velyxora/packages/custody"
 	"velyxora/packages/database"
 	"velyxora/packages/logger"
 	"velyxora/packages/security"
@@ -36,6 +39,7 @@ var globalDB *database.DB
 var globalRedis *common.RedisClient
 var globalKafkaProducer *common.KafkaProducer
 var globalJWTSecret string
+var globalCustodyEngine *custody.CustodyEngine
 
 func main() {
 	// 1. Initialize Log
@@ -82,6 +86,7 @@ func main() {
 			log.Error(fmt.Sprintf("Database migrations failed: %v", err))
 		}
 	}
+	globalCustodyEngine = custody.NewCustodyEngine(globalDB)
 
 	// 4. Setup Redis Connection
 	redisClient, err := common.NewRedisClient(common.RedisConfig{
@@ -613,7 +618,7 @@ func main() {
 				})
 			})
 
-			// Request deposit wallet address validation/allocation
+			// Request deposit wallet address validation/allocation with unique persistent database checks
 			wallet.POST("/address", func(c *gin.Context) {
 				var req struct {
 					Asset string `json:"asset" binding:"required"`
@@ -632,17 +637,57 @@ func main() {
 					return
 				}
 
-				// Assign mock standard validate address based on blockchain adapters
-				address := "0x71C7656EC7ab88b098defB751B7401B5f6d1476B"
-				if strings.ToUpper(req.Asset) == "BTC" {
-					address = "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2"
-				} else if strings.ToUpper(req.Asset) == "SOL" {
-					address = "Hxs86Xj38x8vMvVvE75A9XG9m9L9p9"
+				// Check if address already exists for user and asset to prevent duplicate allocation
+				var address string
+				if globalDB != nil {
+					err = globalDB.Pool.QueryRow(c.Request.Context(),
+						"SELECT address FROM wallet_addresses WHERE user_id = $1 AND asset = $2 AND is_active = TRUE",
+						userClaims.UserID, strings.ToUpper(req.Asset)).Scan(&address)
 				}
 
-				if !adapter.ValidateAddress(address) {
-					c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to formulate valid destination key address"})
-					return
+				if address == "" {
+					// Dynamically generate a uniquely assigned, cryptographically valid address for the user/asset
+					salt := fmt.Sprintf("%s_%s_%d", userClaims.UserID, req.Asset, time.Now().UnixNano())
+					sum := sha256.Sum256([]byte(salt))
+
+					if strings.ToUpper(req.Asset) == "BTC" {
+						// Cryptographically valid Mainnet P2PKH Bitcoin Address (Base58Check with version 0x00)
+						address = common.EncodeBase58Check(0x00, sum[:20])
+					} else if strings.ToUpper(req.Asset) == "SOL" {
+						// Cryptographically valid Solana Address (Base58 encoded Ed25519 public key-like 32-byte representation)
+						address = common.EncodeBase58(sum[:32])
+					} else {
+						// Cryptographically valid Ethereum format address string
+						hash := hex.EncodeToString(sum[:])
+						address = "0x" + hash[:40]
+					}
+
+					// Verify cryptographic validity against the specific adapter
+					if !adapter.ValidateAddress(address) {
+						c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to formulate valid destination key address"})
+						return
+					}
+
+					// Persist newly allocated address to database
+					if globalDB != nil {
+						// Ensure no cross-user ownership of address (unique constraint violation guard)
+						var ownerCheck string
+						_ = globalDB.Pool.QueryRow(c.Request.Context(),
+							"SELECT user_id FROM wallet_addresses WHERE address = $1", address).Scan(&ownerCheck)
+
+						if ownerCheck != "" {
+							c.JSON(http.StatusConflict, gin.H{"error": "Cryptographic conflict: Generated address has duplicate allocation"})
+							return
+						}
+
+						_, err = globalDB.Pool.Exec(c.Request.Context(),
+							"INSERT INTO wallet_addresses (user_id, asset, address, memo, is_active, created_at) VALUES ($1, $2, $3, $4, TRUE, NOW())",
+							userClaims.UserID, strings.ToUpper(req.Asset), address, "Simulated key-derived address")
+						if err != nil {
+							c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist wallet address to database"})
+							return
+						}
+					}
 				}
 
 				c.JSON(http.StatusOK, types.WalletAddress{
@@ -654,8 +699,8 @@ func main() {
 				})
 			})
 
-			// Process withdrawal requests
-			wallet.POST("/withdraw", func(c *gin.Context) {
+			// Process withdrawal requests with RBAC and MFA hardening
+			wallet.POST("/withdraw", RBACMiddleware("wallet:write"), func(c *gin.Context) {
 				var req struct {
 					Asset   string  `json:"asset" binding:"required"`
 					Amount  float64 `json:"amount" binding:"required,gt=0"`
@@ -676,34 +721,276 @@ func main() {
 					return
 				}
 
-				// Address ownership validation (P004 security check)
 				if !adapter.ValidateAddress(req.Address) {
 					c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid destination blockchain address format"})
 					return
 				}
 
+				// Strict MFA verification if enabled & exceeds basic limit
+				if globalDB != nil {
+					var isMFAEnabled bool
+					var mfaSecret string
+					err = globalDB.Pool.QueryRow(c.Request.Context(),
+						"SELECT is_mfa_enabled, mfa_secret FROM users WHERE id = $1", userClaims.UserID).
+						Scan(&isMFAEnabled, &mfaSecret)
+
+					if err == nil && isMFAEnabled {
+						// Require TOTP for any withdrawal over 0.1 BTC, 1.0 ETH or 10.0 SOL/USDT
+						threshold := 1.0
+						if req.Asset == "BTC" {
+							threshold = 0.1
+						} else if req.Asset == "SOL" {
+							threshold = 10.0
+						}
+
+						if req.Amount >= threshold {
+							mfaCode := c.GetHeader("X-MFA-Code")
+							if mfaCode == "" {
+								c.JSON(http.StatusForbidden, gin.H{"error": "Multi-Factor Authentication (MFA) token is required for this transaction", "code": "MFA_REQUIRED"})
+								return
+							}
+
+							if !security.ValidateTOTP(mfaSecret, mfaCode) {
+								c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid Multi-Factor Authentication (MFA) token code"})
+								return
+							}
+						}
+					}
+				}
+
 				fee := 0.0005
-				if strings.ToUpper(req.Asset) == "USDT" {
+				if strings.ToUpper(req.Asset) == "USDT" || strings.ToUpper(req.Asset) == "USDC" {
 					fee = 1.0
 				}
 
-				withdrawal := types.Withdrawal{
-					ID:        "wth_" + fmt.Sprintf("%d", time.Now().UnixNano()),
-					UserID:    userClaims.UserID,
-					Asset:     strings.ToUpper(req.Asset),
-					Amount:    req.Amount,
-					Fee:       fee,
-					Address:   req.Address,
-					Status:    types.WithdrawalPendingApproval,
-					RiskScore: 0.15,
-					CreatedAt: time.Now(),
-					UpdatedAt: time.Now(),
+				totalAmount := common.RoundToPrecision(req.Amount+fee, 8)
+
+				// Determine if dual approval is required by custody policy
+				var startStatus types.WithdrawalStatus = types.WithdrawalApproved
+				if globalCustodyEngine != nil {
+					needsDualApproval, err := globalCustodyEngine.ValidateWithdrawal(req.Asset, req.Amount)
+					if err != nil {
+						c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+						return
+					}
+					if needsDualApproval {
+						startStatus = types.WithdrawalPendingApproval
+					}
+				}
+
+				wthID := "wth_" + fmt.Sprintf("%d", time.Now().UnixNano())
+
+				// Atomic Available Balance Check & Reservation check (Move to reserved segment)
+				if globalDB != nil {
+					tx, err := globalDB.Pool.Begin(c.Request.Context())
+					if err != nil {
+						c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+						return
+					}
+					defer tx.Rollback(c.Request.Context())
+
+					var available, reserved, total float64
+					err = tx.QueryRow(c.Request.Context(),
+						"SELECT available, reserved, total FROM balances WHERE user_id = $1 AND asset = $2 FOR UPDATE",
+						userClaims.UserID, req.Asset).Scan(&available, &reserved, &total)
+
+					if err != nil {
+						c.JSON(http.StatusForbidden, gin.H{"error": "Insufficient wallet funds: balance row does not exist"})
+						return
+					}
+
+					if available < totalAmount {
+						c.JSON(http.StatusForbidden, gin.H{"error": fmt.Sprintf("Insufficient available balance: has %f, needs %f (amount: %f + fee: %f)", available, totalAmount, req.Amount, fee)})
+						return
+					}
+
+					// Deduct available, increase reserved segment
+					newAvailable := common.RoundToPrecision(available-totalAmount, 8)
+					newReserved := common.RoundToPrecision(reserved+totalAmount, 8)
+
+					_, err = tx.Exec(c.Request.Context(),
+						"UPDATE balances SET available = $1, reserved = $2, updated_at = NOW() WHERE user_id = $3 AND asset = $4",
+						newAvailable, newReserved, userClaims.UserID, req.Asset)
+					if err != nil {
+						c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update balances"})
+						return
+					}
+
+					// Insert withdrawal record
+					_, err = tx.Exec(c.Request.Context(),
+						"INSERT INTO withdrawals (id, user_id, asset, amount, fee, address, status, risk_score, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())",
+						wthID, userClaims.UserID, req.Asset, req.Amount, fee, req.Address, string(startStatus), 0.15)
+					if err != nil {
+						c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to register withdrawal record"})
+						return
+					}
+
+					// If dual approval is required, register a custody approval request row
+					if startStatus == types.WithdrawalPendingApproval && globalCustodyEngine != nil {
+						_, err = globalCustodyEngine.CreateApprovalRequest(c.Request.Context(), wthID, req.Asset, req.Amount)
+						if err != nil {
+							c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to initiate custody governance approval"})
+							return
+						}
+					}
+
+					err = tx.Commit(c.Request.Context())
+					if err != nil {
+						c.JSON(http.StatusInternalServerError, gin.H{"error": "Transaction commit failed"})
+						return
+					}
+				}
+
+				// Publish withdrawal requested event
+				if globalKafkaProducer != nil {
+					event := types.KafkaEvent{
+						Type: "withdrawal.requested",
+						Payload: map[string]interface{}{
+							"withdrawal_id": wthID,
+							"user_id":       userClaims.UserID,
+							"asset":         req.Asset,
+							"amount":        req.Amount,
+							"fee":           fee,
+							"address":       req.Address,
+							"status":        string(startStatus),
+						},
+						Timestamp: time.Now(),
+					}
+					_ = globalKafkaProducer.Publish(c.Request.Context(), "velyxora-wallet-updates", "withdrawal.requested", event)
 				}
 
 				c.JSON(http.StatusAccepted, gin.H{
-					"message":    "Withdrawal request registered, pending risk audit",
-					"withdrawal": withdrawal,
+					"message": "Withdrawal request submitted successfully",
+					"withdrawal": gin.H{
+						"id":      wthID,
+						"asset":   req.Asset,
+						"amount":  req.Amount,
+						"fee":     fee,
+						"address": req.Address,
+						"status":  string(startStatus),
+					},
 				})
+			})
+		}
+
+		// Reconciliation and Custody Management Administrative endpoints
+		recon := v1.Group("/reconciliation")
+		recon.Use(UnifiedAuthMiddleware(cfg.JWTSecret))
+		{
+			recon.GET("/status", func(c *gin.Context) {
+				runs := []gin.H{}
+				if globalDB != nil {
+					rows, err := globalDB.Pool.Query(c.Request.Context(),
+						"SELECT id, status, started_at, completed_at FROM reconciliation_runs ORDER BY started_at DESC LIMIT 50")
+					if err == nil {
+						defer rows.Close()
+						for rows.Next() {
+							var id, status string
+							var startedAt time.Time
+							var completedAt *time.Time
+							if rows.Scan(&id, &status, &startedAt, &completedAt) == nil {
+								runs = append(runs, gin.H{
+									"id":           id,
+									"status":       status,
+									"started_at":   startedAt,
+									"completed_at": completedAt,
+								})
+							}
+						}
+					}
+				}
+				c.JSON(http.StatusOK, runs)
+			})
+
+			recon.GET("/issues", func(c *gin.Context) {
+				issues := []gin.H{}
+				if globalDB != nil {
+					rows, err := globalDB.Pool.Query(c.Request.Context(),
+						"SELECT id, run_id, layer, severity, asset, details, timestamp FROM reconciliation_issues ORDER BY timestamp DESC LIMIT 100")
+					if err == nil {
+						defer rows.Close()
+						for rows.Next() {
+							var id, runID, layer, severity, asset, details string
+							var timestamp time.Time
+							if rows.Scan(&id, &runID, &layer, &severity, &asset, &details, &timestamp) == nil {
+								issues = append(issues, gin.H{
+									"id":        id,
+									"run_id":    runID,
+									"layer":     layer,
+									"severity":  severity,
+									"asset":     asset,
+									"details":   details,
+									"timestamp": timestamp,
+								})
+							}
+						}
+					}
+				}
+				c.JSON(http.StatusOK, issues)
+			})
+		}
+
+		custodyGroup := v1.Group("/custody")
+		custodyGroup.Use(UnifiedAuthMiddleware(cfg.JWTSecret))
+		{
+			custodyGroup.POST("/approve/:id", RBACMiddleware("risk:write"), func(c *gin.Context) {
+				approvalID := c.Param("id")
+				claims, _ := c.Get("claims")
+				userClaims := claims.(*security.Claims)
+
+				if globalCustodyEngine == nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "Custody governance engine not configured"})
+					return
+				}
+
+				app, err := globalCustodyEngine.SubmitApproval(c.Request.Context(), approvalID, userClaims.Email)
+				if err != nil {
+					c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+					return
+				}
+
+				// If APPROVED, we update the withdrawal record to APPROVED in the DB
+				if app.Status == "APPROVED" && globalDB != nil {
+					_, err = globalDB.Pool.Exec(c.Request.Context(),
+						"UPDATE withdrawals SET status = 'APPROVED', updated_at = NOW() WHERE id = $1",
+						app.WithdrawalID)
+					if err != nil {
+						c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update withdrawal queue status"})
+						return
+					}
+
+					if globalKafkaProducer != nil {
+						_ = globalKafkaProducer.Publish(c.Request.Context(), "velyxora-wallet-updates", "withdrawal.approved", map[string]interface{}{
+							"withdrawal_id": app.WithdrawalID,
+							"status":        "APPROVED",
+						})
+					}
+				}
+
+				c.JSON(http.StatusOK, gin.H{
+					"message":  "Custody governance signature registered",
+					"approval": app,
+				})
+			})
+
+			custodyGroup.POST("/freeze", RBACMiddleware("risk:write"), func(c *gin.Context) {
+				if globalCustodyEngine == nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "Custody governance engine not configured"})
+					return
+				}
+
+				globalCustodyEngine.SetGlobalFreeze(true)
+				c.JSON(http.StatusOK, gin.H{"message": "Global emergency freeze is now ACTIVE. All transfers blocked."})
+			})
+
+			custodyGroup.POST("/unfreeze", RBACMiddleware("risk:write"), func(c *gin.Context) {
+				if globalCustodyEngine == nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "Custody governance engine not configured"})
+					return
+				}
+
+				globalCustodyEngine.SetGlobalFreeze(false)
+				c.JSON(http.StatusOK, gin.H{"message": "Global emergency freeze has been disabled."})
 			})
 		}
 	}

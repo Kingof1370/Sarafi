@@ -636,6 +636,75 @@ var schemaMigrations = []Migration{
 			CREATE INDEX IF NOT EXISTS idx_idempotency_user ON idempotency_records(user_id);
 		`,
 	},
+	{
+		ID:   36,
+		Name: "create_p0008_tables",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS wallet_addresses (
+				user_id VARCHAR(255) NOT NULL,
+				asset VARCHAR(50) NOT NULL,
+				address VARCHAR(255) PRIMARY KEY,
+				memo VARCHAR(255) DEFAULT '' NOT NULL,
+				is_active BOOLEAN DEFAULT TRUE NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_wallet_addresses_user ON wallet_addresses(user_id);
+
+			CREATE TABLE IF NOT EXISTS custody_vaults (
+				id VARCHAR(255) PRIMARY KEY,
+				name VARCHAR(255) NOT NULL,
+				role VARCHAR(50) NOT NULL,
+				asset VARCHAR(50) NOT NULL,
+				address VARCHAR(255) NOT NULL,
+				vault_limit DECIMAL(36, 18) NOT NULL,
+				balance DECIMAL(36, 18) NOT NULL,
+				is_frozen BOOLEAN DEFAULT FALSE NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+
+			CREATE TABLE IF NOT EXISTS custody_approvals (
+				id VARCHAR(255) PRIMARY KEY,
+				withdrawal_id VARCHAR(255) NOT NULL,
+				asset VARCHAR(50) NOT NULL,
+				amount DECIMAL(36, 18) NOT NULL,
+				status VARCHAR(50) NOT NULL,
+				first_approver VARCHAR(255) DEFAULT '' NOT NULL,
+				second_approver VARCHAR(255) DEFAULT '' NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+
+			CREATE TABLE IF NOT EXISTS custody_emergency_logs (
+				id VARCHAR(255) PRIMARY KEY,
+				action VARCHAR(100) NOT NULL,
+				initiated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+
+			CREATE TABLE IF NOT EXISTS blockchain_scanner_states (
+				network VARCHAR(50) PRIMARY KEY,
+				last_scanned_height INT NOT NULL,
+				updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+
+			CREATE TABLE IF NOT EXISTS reconciliation_runs (
+				id VARCHAR(255) PRIMARY KEY,
+				status VARCHAR(50) NOT NULL,
+				started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				completed_at TIMESTAMP,
+				details TEXT
+			);
+
+			CREATE TABLE IF NOT EXISTS reconciliation_issues (
+				id VARCHAR(255) PRIMARY KEY,
+				run_id VARCHAR(255) NOT NULL,
+				layer VARCHAR(50) NOT NULL,
+				severity VARCHAR(50) NOT NULL,
+				asset VARCHAR(50) NOT NULL,
+				details TEXT NOT NULL,
+				timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+		`,
+	},
 }
 
 // RunMigrations executes schema migration steps on the pgx connection pool
