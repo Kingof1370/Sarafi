@@ -803,6 +803,56 @@ var schemaMigrations = []Migration{
 			ON CONFLICT (id) DO NOTHING;
 		`,
 	},
+	{
+		ID:   38,
+		Name: "create_p0011_disaster_recovery_tables",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS dr_backups (
+				id VARCHAR(255) PRIMARY KEY,
+				backup_type VARCHAR(50) NOT NULL,
+				status VARCHAR(50) NOT NULL,
+				filepath VARCHAR(255) NOT NULL,
+				checksum VARCHAR(255) NOT NULL,
+				wal_lsn VARCHAR(255) DEFAULT '' NOT NULL,
+				db_version VARCHAR(100) NOT NULL,
+				migration_version INT NOT NULL,
+				metadata TEXT DEFAULT '' NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				expires_at TIMESTAMP NOT NULL
+			);
+
+			CREATE TABLE IF NOT EXISTS dr_restores (
+				id VARCHAR(255) PRIMARY KEY,
+				backup_id VARCHAR(255) NOT NULL,
+				status VARCHAR(50) NOT NULL,
+				authorized_by VARCHAR(255) NOT NULL,
+				details TEXT DEFAULT '' NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+
+			CREATE TABLE IF NOT EXISTS dr_system_status (
+				id VARCHAR(50) PRIMARY KEY,
+				mode VARCHAR(50) DEFAULT 'NORMAL' NOT NULL,
+				incident_active BOOLEAN DEFAULT FALSE NOT NULL,
+				last_backup_at TIMESTAMP,
+				last_restore_at TIMESTAMP,
+				rpo_sec DECIMAL(10, 2) DEFAULT 0.0 NOT NULL,
+				rto_sec DECIMAL(10, 2) DEFAULT 0.0 NOT NULL,
+				updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+
+			CREATE TABLE IF NOT EXISTS dr_coordination_locks (
+				lock_key VARCHAR(255) PRIMARY KEY,
+				owner_id VARCHAR(255) NOT NULL,
+				expires_at TIMESTAMP NOT NULL
+			);
+
+			-- Seed initial DR system status
+			INSERT INTO dr_system_status (id, mode, incident_active, rpo_sec, rto_sec)
+			VALUES ('global', 'NORMAL', false, 0.0, 0.0)
+			ON CONFLICT (id) DO NOTHING;
+		`,
+	},
 }
 
 // RunMigrations executes schema migration steps on the pgx connection pool
