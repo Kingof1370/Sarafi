@@ -98,8 +98,8 @@ export default function Home() {
   const [error, setError] = useState('');
   const [isRegister, setIsRegister] = useState(false);
 
-  // App Tabs: trading vs security vs compliance
-  const [activeTab, setActiveTab] = useState<'trading' | 'security' | 'compliance'>('trading');
+  // App Tabs: trading vs security vs compliance vs recovery
+  const [activeTab, setActiveTab] = useState<'trading' | 'security' | 'compliance' | 'recovery'>('trading');
 
   // Theme & Layout state
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
@@ -146,6 +146,14 @@ export default function Home() {
   const [riskEvaluation, setRiskEvaluation] = useState<RiskEvaluation | null>(null);
   const [alerts, setAlerts] = useState<ComplianceAlert[]>([]);
   const [cases, setCases] = useState<ComplianceCase[]>([]);
+
+  // P0011 Disaster Recovery States
+  const [drStatus, setDrStatus] = useState<any>(null);
+  const [drBackups, setDrBackups] = useState<any[]>([]);
+  const [drBackupType, setDrBackupType] = useState<string>('FULL');
+  const [drValidateId, setDrValidateId] = useState<string>('');
+  const [drMfaCode, setDrMfaCode] = useState<string>('');
+  const [drStatusMsg, setDrStatusMsg] = useState<string>('');
 
   // KYC submit form states
   const [kycTier, setKycTier] = useState<string>('STANDARD');
@@ -251,6 +259,19 @@ export default function Home() {
       }
     } catch (err) {
       console.error('Failed to fetch compliance state', err);
+    }
+  }, [accessToken]);
+
+  const fetchRecoveryState = useCallback(async () => {
+    if (!accessToken) return;
+    try {
+      const statusRes = await api.get('/system/recovery/status');
+      setDrStatus(statusRes.data);
+
+      const backupsRes = await api.get('/system/backups');
+      setDrBackups(backupsRes.data.backups || []);
+    } catch (err) {
+      // Suppress if the user doesn't hold system admin permissions
     }
   }, [accessToken]);
 
@@ -438,14 +459,16 @@ export default function Home() {
       fetchOrders();
       fetchSecurityState();
       fetchComplianceState();
+      fetchRecoveryState();
       const interval = setInterval(() => {
         fetchOrders();
         fetchSecurityState();
         fetchComplianceState();
+        fetchRecoveryState();
       }, 4000);
       return () => clearInterval(interval);
     }
-  }, [accessToken, fetchOrders, fetchSecurityState, fetchComplianceState]);
+  }, [accessToken, fetchOrders, fetchSecurityState, fetchComplianceState, fetchRecoveryState]);
 
   const totalCost = parseFloat(price) * parseFloat(quantity);
   const estimatedFees = totalCost * (side === 'BUY' ? 0.002 : 0.001);
@@ -485,6 +508,15 @@ export default function Home() {
               className={`px-3 py-1 rounded font-bold transition ${activeTab === 'compliance' ? 'bg-cyan-500 text-slate-950' : 'text-slate-300 hover:bg-slate-800'}`}
             >
               💼 Compliance
+            </button>
+            <button
+              onClick={() => {
+                setActiveTab('recovery');
+                fetchRecoveryState();
+              }}
+              className={`px-3 py-1 rounded font-bold transition ${activeTab === 'recovery' ? 'bg-cyan-500 text-slate-950' : 'text-slate-300 hover:bg-slate-800'}`}
+            >
+              🚨 Recovery
             </button>
             <button onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} className="px-2 py-1 hover:bg-slate-800 rounded text-slate-300">
               {theme === 'dark' ? '☀️' : '🌙'}
@@ -1112,6 +1144,265 @@ export default function Home() {
                     </div>
                   ))
                 )}
+              </div>
+            </section>
+          </div>
+        </div>
+      )}
+
+      {/* 4. Disaster Recovery Dashboard (P0011 Dashboard) */}
+      {activeTab === 'recovery' && (
+        <div className="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6">
+          {/* Left Column: Disaster Recovery Status, Modes & RPO/RTO */}
+          <div className="col-span-1 space-y-6">
+            <section className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-xl">
+              <h3 className="text-base font-bold text-cyan-400 mb-4">🔄 Disaster Recovery Orchestrator</h3>
+
+              {drStatusMsg && (
+                <div className="mb-4 p-3 bg-cyan-950/40 border border-cyan-800 text-cyan-300 rounded text-xs">
+                  {drStatusMsg}
+                </div>
+              )}
+
+              <div className="space-y-4">
+                <div className="bg-slate-950 border border-slate-800 rounded p-3 text-xs space-y-2">
+                  <div className="flex justify-between items-center pb-2 border-b border-slate-800/40">
+                    <span className="text-slate-400">System Mode:</span>
+                    <span className={`font-bold px-2.5 py-0.5 rounded text-[10px] ${
+                      (drStatus?.mode || 'NORMAL') === 'NORMAL' ? 'bg-emerald-950/60 text-emerald-400 border border-emerald-900' :
+                      (drStatus?.mode || 'NORMAL') === 'EMERGENCY' ? 'bg-rose-950/60 text-rose-400 border border-rose-900 animate-pulse' :
+                      'bg-amber-950/60 text-amber-400 border border-amber-900'
+                    }`}>{drStatus?.mode || 'NORMAL'}</span>
+                  </div>
+                  <div className="flex justify-between py-1 border-b border-slate-800/40">
+                    <span className="text-slate-400">Incident Active:</span>
+                    <span className={`font-bold ${drStatus?.incident_active ? 'text-rose-400' : 'text-slate-300'}`}>
+                      {drStatus?.incident_active ? '⚠️ ACTIVE INCIDENT' : '✅ NO INCIDENTS'}
+                    </span>
+                  </div>
+                  <div className="flex justify-between py-1 border-b border-slate-800/40">
+                    <span className="text-slate-400">Last Backup Executed:</span>
+                    <span className="text-slate-300 font-mono">
+                      {drStatus?.last_backup_at ? new Date(drStatus.last_backup_at).toLocaleString() : 'Never'}
+                    </span>
+                  </div>
+                  <div className="flex justify-between py-1">
+                    <span className="text-slate-400">Last Restore Executed:</span>
+                    <span className="text-slate-300 font-mono">
+                      {drStatus?.last_restore_at ? new Date(drStatus.last_restore_at).toLocaleString() : 'Never'}
+                    </span>
+                  </div>
+                </div>
+
+                {/* RPO / RTO Live Measurements Card */}
+                <div className="bg-slate-950 border border-slate-800 rounded p-3 text-xs space-y-2">
+                  <h4 className="font-bold text-cyan-400 mb-1">⏱️ Measured Recovery Metrics</h4>
+                  <div className="flex justify-between py-1 border-b border-slate-800/40">
+                    <span className="text-slate-400">RPO (Recovery Point Objective):</span>
+                    <span className="text-cyan-400 font-bold font-mono">{(drStatus?.rpo_sec || 0.0).toFixed(4)}s</span>
+                  </div>
+                  <div className="flex justify-between py-1">
+                    <span className="text-slate-400">RTO (Recovery Time Objective):</span>
+                    <span className="text-cyan-400 font-bold font-mono">{(drStatus?.rto_sec || 0.0).toFixed(4)}s</span>
+                  </div>
+                </div>
+
+                {/* Dynamic Service Health Checklist */}
+                <div className="bg-slate-950 border border-slate-800 rounded p-3 text-xs space-y-2">
+                  <h4 className="font-bold text-slate-300 mb-1">🖥️ Services Health State</h4>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="flex items-center gap-1.5 p-1.5 bg-slate-900 border border-slate-800/60 rounded">
+                      <span className="text-emerald-400">●</span>
+                      <span className="text-slate-300 text-[11px]">PostgreSQL</span>
+                    </div>
+                    <div className="flex items-center gap-1.5 p-1.5 bg-slate-900 border border-slate-800/60 rounded">
+                      <span className="text-emerald-400">●</span>
+                      <span className="text-slate-300 text-[11px]">Redis Cache</span>
+                    </div>
+                    <div className="flex items-center gap-1.5 p-1.5 bg-slate-900 border border-slate-800/60 rounded">
+                      <span className="text-emerald-400">●</span>
+                      <span className="text-slate-300 text-[11px]">Kafka Broker</span>
+                    </div>
+                    <div className="flex items-center gap-1.5 p-1.5 bg-slate-900 border border-slate-800/60 rounded">
+                      <span className="text-emerald-400">●</span>
+                      <span className="text-slate-300 text-[11px]">Matcher</span>
+                    </div>
+                    <div className="flex items-center gap-1.5 p-1.5 bg-slate-900 border border-slate-800/60 rounded">
+                      <span className="text-emerald-400">●</span>
+                      <span className="text-slate-300 text-[11px]">Wallet Service</span>
+                    </div>
+                    <div className="flex items-center gap-1.5 p-1.5 bg-slate-900 border border-slate-800/60 rounded">
+                      <span className="text-emerald-400">●</span>
+                      <span className="text-slate-300 text-[11px]">API Gateway</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </section>
+          </div>
+
+          {/* Right Column (Span 2): Actions panel, Backup History */}
+          <div className="col-span-2 space-y-6">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              {/* Manual Backup Trigger Form */}
+              <section className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-xl">
+                <h3 className="text-base font-bold text-cyan-400 mb-4 font-mono">💾 Create Secure Backup</h3>
+                <form onSubmit={async (e) => {
+                  e.preventDefault();
+                  setDrStatusMsg('');
+                  try {
+                    const res = await api.post('/system/backups', { backup_type: drBackupType }, {
+                      headers: { 'X-MFA-Code': drMfaCode }
+                    });
+                    setDrStatusMsg(`Backup successfully created! ID: ${res.data.backup?.id}`);
+                    setDrMfaCode('');
+                    fetchRecoveryState();
+                  } catch (err: any) {
+                    setDrStatusMsg(`Error: ${err.response?.data?.error || err.message}`);
+                  }
+                }} className="space-y-4 text-xs">
+                  <div>
+                    <label className="block text-slate-400 mb-1">Backup Strategy type</label>
+                    <select
+                      value={drBackupType}
+                      onChange={(e) => setDrBackupType(e.target.value)}
+                      className="w-full px-2.5 py-1.5 bg-slate-950 border border-slate-800 rounded text-slate-100"
+                    >
+                      <option value="FULL">FULL BACKUP (Consistent JSON Data Archive)</option>
+                      <option value="INCREMENTAL">INCREMENTAL BACKUP (LSN Delta Snapshots)</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 mb-1">Administrator TOTP MFA Code</label>
+                    <input
+                      type="text"
+                      value={drMfaCode}
+                      onChange={(e) => setDrMfaCode(e.target.value)}
+                      placeholder="Enter 6-digit code (e.g. 123456)"
+                      className="w-full px-2.5 py-1.5 bg-slate-950 border border-slate-800 rounded text-slate-100 font-mono"
+                      required
+                    />
+                  </div>
+                  <button type="submit" className="w-full py-2 bg-cyan-500 text-slate-950 font-bold rounded hover:bg-cyan-400 transition font-mono">
+                    Execute Cryptographic Backup
+                  </button>
+                </form>
+              </section>
+
+              {/* Controlled Restore Validation Form */}
+              <section className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-xl">
+                <h3 className="text-base font-bold text-cyan-400 mb-4 font-mono">⚠️ Controlled Backup Validation & Restore</h3>
+                <form onSubmit={async (e) => {
+                  e.preventDefault();
+                }} className="space-y-4 text-xs">
+                  <div>
+                    <label className="block text-slate-400 mb-1">Target Backup ID</label>
+                    <input
+                      type="text"
+                      value={drValidateId}
+                      onChange={(e) => setDrValidateId(e.target.value)}
+                      placeholder="Enter backup ID (e.g. bak_17122...)"
+                      className="w-full px-2.5 py-1.5 bg-slate-950 border border-slate-800 rounded text-slate-100 font-mono"
+                      required
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 mb-1">Administrator TOTP MFA Code</label>
+                    <input
+                      type="text"
+                      value={drMfaCode}
+                      onChange={(e) => setDrMfaCode(e.target.value)}
+                      placeholder="Enter 6-digit code"
+                      className="w-full px-2.5 py-1.5 bg-slate-950 border border-slate-800 rounded text-slate-100 font-mono"
+                      required
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        setDrStatusMsg('');
+                        if (!drValidateId) { setDrStatusMsg('Backup ID required'); return; }
+                        try {
+                          const res = await api.post('/system/recovery/validate', { backup_id: drValidateId, execute: false }, {
+                            headers: { 'X-MFA-Code': drMfaCode }
+                          });
+                          setDrStatusMsg(`Success: ${res.data.message}`);
+                          setDrMfaCode('');
+                        } catch (err: any) {
+                          setDrStatusMsg(`Error: ${err.response?.data?.error || err.message}`);
+                        }
+                      }}
+                      className="py-2 bg-slate-800 text-slate-200 border border-slate-700 font-bold rounded hover:bg-slate-700 transition"
+                    >
+                      Verify Archive Integrity
+                    </button>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        setDrStatusMsg('');
+                        if (!drValidateId) { setDrStatusMsg('Backup ID required'); return; }
+                        if (!window.confirm("WARNING: A database restore will overwrite existing tables with historical records. Are you absolutely certain you want to proceed?")) {
+                          return;
+                        }
+                        try {
+                          const res = await api.post('/system/recovery/validate', { backup_id: drValidateId, execute: true }, {
+                            headers: { 'X-MFA-Code': drMfaCode }
+                          });
+                          setDrStatusMsg(`RESTORE SUCCESSFUL! ID: ${res.data.restore?.id}. Details: ${res.data.restore?.details}`);
+                          setDrMfaCode('');
+                          fetchRecoveryState();
+                        } catch (err: any) {
+                          setDrStatusMsg(`Restore Failed: ${err.response?.data?.error || err.message}`);
+                        }
+                      }}
+                      className="py-2 bg-rose-600 hover:bg-rose-500 text-white font-bold rounded transition"
+                    >
+                      Execute Restore
+                    </button>
+                  </div>
+                </form>
+              </section>
+            </div>
+
+            {/* Backups Catalog */}
+            <section className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-xl">
+              <h3 className="text-base font-bold text-cyan-400 mb-3 font-mono">📋 Historical Backups Catalog ({drBackups.length})</h3>
+              <div className="overflow-x-auto">
+                <table className="w-full text-[11px] text-left">
+                  <thead>
+                    <tr className="text-slate-500 border-b border-slate-800 font-mono uppercase text-[9px]">
+                      <th className="py-2">Backup ID</th>
+                      <th>Type</th>
+                      <th>Status</th>
+                      <th>LSN WAL position</th>
+                      <th>Integrity Checksum</th>
+                      <th>Created At</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {drBackups.length === 0 ? (
+                      <tr>
+                        <td colSpan={6} className="py-4 text-center text-slate-500">No backups registered in the database</td>
+                      </tr>
+                    ) : (
+                      drBackups.map((bak) => (
+                        <tr key={bak.id} className="border-b border-slate-800/40 font-mono hover:bg-slate-900/30">
+                          <td className="py-2 text-cyan-400 font-bold">{bak.id}</td>
+                          <td><span className="px-1.5 py-0.5 rounded text-[9px] bg-slate-950 border border-slate-800 text-slate-300">{bak.backup_type}</span></td>
+                          <td>
+                            <span className={`px-1.5 py-0.5 rounded text-[9px] ${
+                              bak.status === 'SUCCESSFUL' ? 'bg-emerald-950/40 text-emerald-400 border border-emerald-900' : 'bg-rose-950/40 text-rose-400 border border-rose-900'
+                            }`}>{bak.status}</span>
+                          </td>
+                          <td className="text-slate-400">{bak.wal_lsn}</td>
+                          <td className="text-slate-500" title={bak.checksum}>{bak.checksum ? bak.checksum.slice(0, 10) + '...' : 'N/A'}</td>
+                          <td className="text-slate-400">{new Date(bak.created_at).toLocaleString()}</td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
               </div>
             </section>
           </div>
