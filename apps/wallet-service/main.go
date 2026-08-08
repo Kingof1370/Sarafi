@@ -34,10 +34,15 @@ func NewBalanceEngine(db *database.DB) *BalanceEngine {
 
 // ProcessDoubleEntry forces absolute balance matches to ledger debits/credits to enforce financial safety
 func (be *BalanceEngine) ProcessDoubleEntry(ctx context.Context, txID string, debitUser, creditUser string, asset string, amount float64, description string) error {
+	// Increment metrics for Velyxora wallet operations
+	common.GetObservabilityManager().IncrementCounter("wallet_operations_total", map[string]string{"asset": asset})
+
 	// If PostgreSQL database connection pool is available, use real transactional SQL persistence
 	if be.db != nil {
+		start := time.Now()
 		tx, err := be.db.Pool.Begin(ctx)
 		if err != nil {
+			common.GetObservabilityManager().IncrementCounter("database_errors_total", map[string]string{"operation": "begin_transaction"})
 			return fmt.Errorf("failed to begin ledger transaction: %w", err)
 		}
 		defer tx.Rollback(ctx)
@@ -124,8 +129,11 @@ func (be *BalanceEngine) ProcessDoubleEntry(ctx context.Context, txID string, de
 
 		// Commit complete atomic settlement
 		if err := tx.Commit(ctx); err != nil {
+			common.GetObservabilityManager().IncrementCounter("database_errors_total", map[string]string{"operation": "commit_transaction"})
 			return fmt.Errorf("failed to commit ledger transaction: %w", err)
 		}
+
+		common.GetObservabilityManager().ObserveHistogram("database_latency_ms", float64(time.Since(start).Milliseconds()), map[string]string{"operation": "settle_double_entry"})
 		return nil
 	}
 
@@ -196,6 +204,9 @@ func main() {
 
 	log.Info("Starting Velyxora Wallet Service...")
 
+	// Register with Observability manager
+	common.GetObservabilityManager().SetServiceName("wallet-service")
+
 	kafkaBrokers := strings.Split(getEnv("KAFKA_BROKERS", "localhost:9092"), ",")
 	consumer := common.NewKafkaConsumer(kafkaBrokers, "velyxora-trades", "wallet-service-group")
 	producer := common.NewKafkaProducer(kafkaBrokers)
@@ -239,6 +250,7 @@ func main() {
 	log.Info("Listening to trade results on Kafka to settle balances...")
 
 	err := consumer.Consume(ctx, func(key string, value []byte) error {
+		start := time.Now()
 		var event types.KafkaEvent
 		if err := json.Unmarshal(value, &event); err != nil {
 			log.Error(fmt.Sprintf("Failed to parse Kafka event: %v", err))
@@ -267,6 +279,7 @@ func main() {
 			err = be.ProcessDoubleEntry(ctx, txID, trade.BuyerID, trade.SellerID, quoteAsset, quoteAmount, fmt.Sprintf("Settled trade purchase: %s", trade.ID))
 			if err != nil {
 				log.Error("Failed to settle Quote ledger transfer", "err", err)
+				common.GetObservabilityManager().IncrementCounter("settlement_failures_total", map[string]string{"trade_id": trade.ID})
 				return nil
 			}
 
@@ -274,6 +287,7 @@ func main() {
 			err = be.ProcessDoubleEntry(ctx, txID, trade.SellerID, trade.BuyerID, baseAsset, trade.Quantity, fmt.Sprintf("Settled trade delivery: %s", trade.ID))
 			if err != nil {
 				log.Error("Failed to settle Base ledger transfer", "err", err)
+				common.GetObservabilityManager().IncrementCounter("settlement_failures_total", map[string]string{"trade_id": trade.ID})
 				return nil
 			}
 
@@ -283,7 +297,13 @@ func main() {
 				Payload:   trade,
 				Timestamp: time.Now(),
 			}
-			_ = producer.Publish(ctx, "velyxora-balances", trade.BuyerID, balanceEvent)
+			errPublish := producer.Publish(ctx, "velyxora-balances", trade.BuyerID, balanceEvent)
+			if errPublish != nil {
+				common.GetObservabilityManager().IncrementCounter("kafka_publish_failures_total", map[string]string{"topic": "velyxora-balances"})
+			}
+
+			// Observe settlement latency in milliseconds
+			common.GetObservabilityManager().ObserveHistogram("settlement_latency_ms", float64(time.Since(start).Milliseconds()), map[string]string{"symbol": trade.Symbol})
 		}
 
 		return nil

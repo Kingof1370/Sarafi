@@ -658,6 +658,43 @@ var schemaMigrations = []Migration{
 			CREATE INDEX IF NOT EXISTS idx_candles_query ON candles(symbol, interval, open_time DESC);
 		`,
 	},
+	{
+		ID:   37,
+		Name: "create_p0010_observability_and_incident_tables",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS incidents (
+				id VARCHAR(255) PRIMARY KEY,
+				severity VARCHAR(50) NOT NULL,
+				source VARCHAR(100) NOT NULL,
+				description TEXT NOT NULL,
+				affected_service VARCHAR(100) NOT NULL,
+				status VARCHAR(50) NOT NULL,
+				assignee VARCHAR(255) DEFAULT '' NOT NULL,
+				resolution_notes TEXT DEFAULT '' NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+
+			CREATE TABLE IF NOT EXISTS incident_events (
+				id VARCHAR(255) PRIMARY KEY,
+				incident_id VARCHAR(255) NOT NULL,
+				event_type VARCHAR(100) NOT NULL,
+				details TEXT NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				FOREIGN KEY (incident_id) REFERENCES incidents(id) ON DELETE CASCADE
+			);
+
+			CREATE TABLE IF NOT EXISTS alert_states (
+				id VARCHAR(255) PRIMARY KEY,
+				alert_name VARCHAR(255) NOT NULL,
+				severity VARCHAR(50) NOT NULL,
+				status VARCHAR(50) NOT NULL,
+				details TEXT NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+		`,
+	},
 }
 
 // RunMigrations executes schema migration steps on the pgx connection pool

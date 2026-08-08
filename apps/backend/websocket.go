@@ -82,6 +82,8 @@ func (g *WSGateway) BroadcastToChannel(channel string, message []byte) {
 				// Mark unhealthy and disconnect safely.
 				client.unhealthy = true
 				go func(c *Client) {
+					c.mu.Lock()
+					defer c.mu.Unlock()
 					_ = c.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "Slow Consumer Protection Triggered"))
 					_ = c.conn.Close()
 				}(client)
@@ -172,13 +174,20 @@ func (g *WSGateway) writeLoop(c *Client) {
 		select {
 		case msg, ok := <-c.send:
 			if !ok {
-				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
+				c.mu.Lock()
+				_ = c.conn.WriteMessage(websocket.CloseMessage, []byte{})
+				c.mu.Unlock()
 				return
 			}
-			c.conn.WriteMessage(websocket.TextMessage, msg)
+			c.mu.Lock()
+			_ = c.conn.WriteMessage(websocket.TextMessage, msg)
+			c.mu.Unlock()
 		case <-ticker.C:
-			c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+			c.mu.Lock()
+			_ = c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			err := c.conn.WriteMessage(websocket.PingMessage, nil)
+			c.mu.Unlock()
+			if err != nil {
 				return
 			}
 		}

@@ -62,6 +62,9 @@ func main() {
 	}
 	globalJWTSecret = cfg.JWTSecret
 
+	// Register current microservice name with Observability Manager
+	common.GetObservabilityManager().SetServiceName("api-gateway")
+
 	// 3. Setup Postgres Connection
 	db, err := database.NewConnectionPool(database.Config{
 		Host:     cfg.DBHost,
@@ -73,6 +76,7 @@ func main() {
 	})
 	if err != nil {
 		log.Warn(fmt.Sprintf("Database connection failed (continuing bootstrap in fallback mode): %v", err))
+		common.GetObservabilityManager().IncrementCounter("database_errors_total", map[string]string{"type": "connection_pool_init"})
 	} else {
 		globalDB = db
 		defer db.Close()
@@ -92,6 +96,7 @@ func main() {
 	})
 	if err != nil {
 		log.Warn(fmt.Sprintf("Redis connection failed (continuing bootstrap in fallback mode): %v", err))
+		common.GetObservabilityManager().IncrementCounter("redis_errors_total", map[string]string{"type": "init"})
 	} else {
 		globalRedis = redisClient
 		log.Info("Redis client connected successfully.")
@@ -129,8 +134,8 @@ func main() {
 	// CORS Policy Middleware
 	r.Use(func(c *gin.Context) {
 		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
-		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization")
+		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE, PATCH")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, X-MFA-Code, X-Idempotency-Key, X-Trace-ID")
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(http.StatusNoContent)
 			return
@@ -156,6 +161,13 @@ func main() {
 		latency := time.Since(start)
 		status := c.Writer.Status()
 
+		// Record latency and request count metrics
+		common.GetObservabilityManager().IncrementCounter("api_requests_total", map[string]string{"path": path, "status": fmt.Sprintf("%d", status)})
+		common.GetObservabilityManager().ObserveHistogram("api_latency_ms", float64(latency.Milliseconds()), map[string]string{"path": path})
+		if status >= 400 {
+			common.GetObservabilityManager().IncrementCounter("api_errors_total", map[string]string{"path": path, "status": fmt.Sprintf("%d", status)})
+		}
+
 		log.Info("HTTP Request",
 			"trace_id", traceID,
 			"method", c.Request.Method,
@@ -170,31 +182,88 @@ func main() {
 	// Redis Distributed Rate Limiting Middleware
 	r.Use(RateLimiterMiddleware())
 
-	// Health Check / Readiness / Liveness Probe Endpoint
+	// Health Check / Readiness / Liveness Probe Endpoint (P0010 compliant)
 	r.GET("/health", func(c *gin.Context) {
-		dbStatus := "UP"
-		if db == nil || db.Ping(c.Request.Context()) != nil {
-			dbStatus = "DOWN"
-		}
-
-		redisStatus := "UP"
-		if redisClient == nil || redisClient.Ping(c.Request.Context()) != nil {
-			redisStatus = "DOWN"
-		}
-
-		c.JSON(http.StatusOK, gin.H{
-			"status": "UP",
-			"time":   time.Now().Format(time.RFC3339),
-			"components": gin.H{
-				"postgres": dbStatus,
-				"redis":    redisStatus,
+		status, details := common.GetObservabilityManager().CheckDependencyHealth(
+			c.Request.Context(),
+			func(ctx context.Context) error {
+				if db == nil {
+					return fmt.Errorf("no connection pool initialized")
+				}
+				return db.Ping(ctx)
 			},
+			func(ctx context.Context) error {
+				if redisClient == nil {
+					return fmt.Errorf("no redis client initialized")
+				}
+				return redisClient.Ping(ctx)
+			},
+			nil, // optional dependency check
+			nil, // optional dependency check
+		)
+
+		statusCode := http.StatusOK
+		if status == common.StatusNotReady {
+			statusCode = http.StatusServiceUnavailable
+		}
+
+		c.JSON(statusCode, gin.H{
+			"status":     status,
+			"time":       time.Now().Format(time.RFC3339),
+			"components": details,
 		})
 	})
 
-	// Prometheus Metrics Endpoint Placeholder
+	// Unified system readiness probe
+	r.GET("/readiness", func(c *gin.Context) {
+		status, details := common.GetObservabilityManager().CheckDependencyHealth(
+			c.Request.Context(),
+			func(ctx context.Context) error {
+				if db == nil {
+					return fmt.Errorf("no connection pool initialized")
+				}
+				return db.Ping(ctx)
+			},
+			func(ctx context.Context) error {
+				if redisClient == nil {
+					return fmt.Errorf("no redis client initialized")
+				}
+				return redisClient.Ping(ctx)
+			},
+			nil,
+			nil,
+		)
+
+		statusCode := http.StatusOK
+		if status == common.StatusNotReady {
+			statusCode = http.StatusServiceUnavailable
+		}
+
+		c.JSON(statusCode, gin.H{
+			"status":     status,
+			"readiness":  status == common.StatusReady || status == common.StatusLive,
+			"components": details,
+		})
+	})
+
+	// Prometheus Metrics Endpoint (P0010 compliant)
 	r.GET("/metrics", func(c *gin.Context) {
-		c.String(http.StatusOK, "# HELP velyxora_api_gateway_uptime Gateway uptime counter\n# TYPE velyxora_api_gateway_uptime counter\nvelyxora_api_gateway_uptime 1.0\n")
+		metricsList := common.GetObservabilityManager().SnapshotMetrics()
+		sb := strings.Builder{}
+		sb.WriteString("# HELP velyxora_api_gateway_uptime Gateway uptime counter\n# TYPE velyxora_api_gateway_uptime counter\nvelyxora_api_gateway_uptime 1.0\n")
+
+		for _, m := range metricsList {
+			labelParts := []string{}
+			for k, v := range m.Labels {
+				labelParts = append(labelParts, fmt.Sprintf("%s=%q", k, v))
+			}
+			labelsStr := ""
+			if len(labelParts) > 0 {
+				labelsStr = "{" + strings.Join(labelParts, ",") + "}"
+			}
+			sb.WriteString(fmt.Sprintf("velyxora_%s%s %f\n", m.Name, labelsStr, m.Value))
+		}
+		c.String(http.StatusOK, sb.String())
 	})
 
 	// Real-time Gateway WebSocket Core
@@ -205,6 +274,62 @@ func main() {
 	{
 		// Register API Key management routes
 		RegisterAPIKeyHandlers(v1)
+
+		// P0010 Central Observability & Incidents administration
+		sysGroup := v1.Group("/system")
+		sysGroup.Use(UnifiedAuthMiddleware(cfg.JWTSecret))
+		sysGroup.Use(RBACMiddleware("system:admin"))
+		{
+			sysGroup.GET("/health", func(c *gin.Context) {
+				res := common.GetObservabilityManager().CollectSystemResources()
+				c.JSON(http.StatusOK, res)
+			})
+
+			sysGroup.GET("/readiness", func(c *gin.Context) {
+				status, details := common.GetObservabilityManager().CheckDependencyHealth(
+					c.Request.Context(),
+					func(ctx context.Context) error {
+						if db == nil {
+							return fmt.Errorf("no database initialized")
+						}
+						return db.Ping(ctx)
+					},
+					func(ctx context.Context) error {
+						if redisClient == nil {
+							return fmt.Errorf("no redis initialized")
+						}
+						return redisClient.Ping(ctx)
+					},
+					nil,
+					nil,
+				)
+				c.JSON(http.StatusOK, gin.H{
+					"status":     status,
+					"components": details,
+				})
+			})
+
+			sysGroup.GET("/metrics", func(c *gin.Context) {
+				snapshot := common.GetObservabilityManager().SnapshotMetrics()
+				c.JSON(http.StatusOK, gin.H{
+					"metrics": snapshot,
+				})
+			})
+		}
+
+		// Incident response endpoint handlers (RBAC protection)
+		incGroup := v1.Group("/incidents")
+		incGroup.Use(UnifiedAuthMiddleware(cfg.JWTSecret))
+		incGroup.Use(RBACMiddleware("system:admin"))
+		{
+			incGroup.GET("", handleGetIncidents)
+			incGroup.GET("/:id", handleGetIncidentByID)
+			incGroup.POST("", handleCreateIncident)
+			incGroup.PATCH("/:id", handlePatchIncident)
+		}
+
+		// Central secure auditing logs access handler (RBAC validation)
+		v1.GET("/audit/events", UnifiedAuthMiddleware(cfg.JWTSecret), RBACMiddleware("support:read"), handleGetAuditEvents)
 
 		// Public Market Data REST endpoints
 		marketGroup := v1.Group("/market")
@@ -290,6 +415,7 @@ func main() {
 
 				// 1. Check Brute-Force Lockout Status (Email and IP)
 				if isLocked, lockedUntil, err := CheckBruteForceAndLock(req.Email); err == nil && isLocked {
+					common.GetObservabilityManager().IncrementCounter("mfa_brute_force_lockouts_total", map[string]string{"type": "email"})
 					c.JSON(http.StatusLocked, gin.H{
 						"error":        "Account is temporarily locked due to excessive login failures.",
 						"locked_until": lockedUntil.Format(time.RFC3339),
@@ -298,6 +424,7 @@ func main() {
 				}
 
 				if isLocked, lockedUntil, err := CheckBruteForceAndLock(clientIP); err == nil && isLocked {
+					common.GetObservabilityManager().IncrementCounter("mfa_brute_force_lockouts_total", map[string]string{"type": "ip"})
 					c.JSON(http.StatusLocked, gin.H{
 						"error":        "Your IP address is temporarily locked due to excessive login failures.",
 						"locked_until": lockedUntil.Format(time.RFC3339),
@@ -317,6 +444,7 @@ func main() {
 					if err != nil {
 						_ = RecordLockoutFailure(req.Email)
 						_ = RecordLockoutFailure(clientIP)
+						common.GetObservabilityManager().IncrementCounter("authentication_failures_total", map[string]string{"reason": "user_not_found"})
 						c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid email or password"})
 						return
 					}
@@ -324,6 +452,7 @@ func main() {
 					if !security.CheckPasswordHash(req.Password, hashedPassword) {
 						_ = RecordLockoutFailure(req.Email)
 						_ = RecordLockoutFailure(clientIP)
+						common.GetObservabilityManager().IncrementCounter("authentication_failures_total", map[string]string{"reason": "wrong_password"})
 						c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid email or password"})
 						return
 					}
@@ -332,6 +461,7 @@ func main() {
 					userID = "usr_mock_123"
 					hashedPassword, _ = security.HashPassword("StrongPass1!")
 					if req.Email != "test@velyxora.com" || req.Password != "StrongPass1!" {
+						common.GetObservabilityManager().IncrementCounter("authentication_failures_total", map[string]string{"reason": "invalid_mock"})
 						c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid mock credentials"})
 						return
 					}
@@ -564,7 +694,8 @@ func main() {
 					UpdatedAt: time.Now(),
 				}
 
-				// Emit Event to Kafka
+				// Trace/Correlation ID propagation inside versioned Kafka events
+				traceID, _ := c.Get("trace_id")
 				event := types.KafkaEvent{
 					Type:      types.EventOrderCreated,
 					Payload:   order,
@@ -572,11 +703,20 @@ func main() {
 				}
 
 				// Publish to order matching queue
-				_ = kafkaProducer.Publish(context.Background(), "velyxora-orders", order.ID, event)
+				err := kafkaProducer.Publish(context.Background(), "velyxora-orders", order.ID, event)
+				if err != nil {
+					common.GetObservabilityManager().IncrementCounter("kafka_publish_failures_total", map[string]string{"topic": "velyxora-orders"})
+				} else {
+					common.GetObservabilityManager().IncrementCounter("orders_accepted_total", map[string]string{"symbol": req.Symbol})
+				}
+
+				// Audit security trail log integration
+				WriteAuditEvent(c.Request.Context(), "ORDER_PLACEMENT", "LOW", userClaims.UserID, userClaims.SessionID, "", fmt.Sprintf("Order placed: %s", order.ID), "{}", c.ClientIP(), c.Request.UserAgent())
 
 				c.JSON(http.StatusAccepted, gin.H{
-					"message": "Order created and queued",
-					"order":   order,
+					"message":      "Order created and queued",
+					"order":        order,
+					"correlation":  traceID,
 				})
 			})
 		}
@@ -586,9 +726,14 @@ func main() {
 		mfa.Use(UnifiedAuthMiddleware(cfg.JWTSecret))
 		{
 			mfa.POST("/enable", func(c *gin.Context) {
+				claims, _ := c.Get("claims")
+				userClaims := claims.(*security.Claims)
+
+				WriteAuditEvent(c.Request.Context(), "MFA_ENABLED", "MEDIUM", userClaims.UserID, userClaims.SessionID, "", "MFA enrollment initiated", "{}", c.ClientIP(), c.Request.UserAgent())
+
 				c.JSON(http.StatusOK, gin.H{
-					"mfa_secret": "JBSWY3DPEHPK3PXP",
-					"qr_code_url": "otpauth://totp/Velyxora:user?secret=JBSWY3DPEHPK3PXP&issuer=Velyxora",
+					"mfa_secret":   "JBSWY3DPEHPK3PXP",
+					"qr_code_url":  "otpauth://totp/Velyxora:user?secret=JBSWY3DPEHPK3PXP&issuer=Velyxora",
 					"backup_codes": []string{"1234-5678", "abcd-efgh", "9876-5432"},
 				})
 			})
@@ -715,6 +860,9 @@ func main() {
 					UpdatedAt: time.Now(),
 				}
 
+				WriteAuditEvent(c.Request.Context(), "WITHDRAWAL_REQUEST", "LOW", userClaims.UserID, userClaims.SessionID, "", fmt.Sprintf("Withdrawal initiated for %f %s", req.Amount, req.Asset), "{}", c.ClientIP(), c.Request.UserAgent())
+				common.GetObservabilityManager().IncrementCounter("withdrawal_processing_total", map[string]string{"asset": req.Asset})
+
 				c.JSON(http.StatusAccepted, gin.H{
 					"message":    "Withdrawal request registered, pending risk audit",
 					"withdrawal": withdrawal,
@@ -750,6 +898,193 @@ func main() {
 	}
 
 	log.Info("Velyxora REST Gateway exited successfully.")
+}
+
+// REST Handlers for Incidents
+type Incident struct {
+	ID               string    `json:"id" db:"id"`
+	Severity         string    `json:"severity" db:"severity"`
+	Source           string    `json:"source" db:"source"`
+	Description      string    `json:"description" db:"description"`
+	AffectedService  string    `json:"affected_service" db:"affected_service"`
+	Status           string    `json:"status" db:"status"` // OPEN, ACKNOWLEDGED, INVESTIGATING, MITIGATED, RESOLVED, CLOSED
+	Assignee         string    `json:"assignee" db:"assignee"`
+	ResolutionNotes  string    `json:"resolution_notes" db:"resolution_notes"`
+	CreatedAt        time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at" db:"updated_at"`
+}
+
+func handleGetIncidents(c *gin.Context) {
+	incidents := []Incident{}
+	if globalDB != nil {
+		rows, err := globalDB.Pool.Query(c.Request.Context(),
+			"SELECT id, severity, source, description, affected_service, status, assignee, resolution_notes, created_at, updated_at FROM incidents ORDER BY created_at DESC")
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var inc Incident
+				errScan := rows.Scan(&inc.ID, &inc.Severity, &inc.Source, &inc.Description, &inc.AffectedService, &inc.Status, &inc.Assignee, &inc.ResolutionNotes, &inc.CreatedAt, &inc.UpdatedAt)
+				if errScan == nil {
+					incidents = append(incidents, inc)
+				}
+			}
+		}
+	}
+	c.JSON(http.StatusOK, incidents)
+}
+
+func handleGetIncidentByID(c *gin.Context) {
+	id := c.Param("id")
+	if globalDB == nil {
+		c.JSON(http.StatusOK, Incident{ID: id, Status: "OPEN"})
+		return
+	}
+
+	var inc Incident
+	err := globalDB.Pool.QueryRow(c.Request.Context(),
+		"SELECT id, severity, source, description, affected_service, status, assignee, resolution_notes, created_at, updated_at FROM incidents WHERE id = $1", id).
+		Scan(&inc.ID, &inc.Severity, &inc.Source, &inc.Description, &inc.AffectedService, &inc.Status, &inc.Assignee, &inc.ResolutionNotes, &inc.CreatedAt, &inc.UpdatedAt)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Incident not found"})
+		return
+	}
+	c.JSON(http.StatusOK, inc)
+}
+
+func handleCreateIncident(c *gin.Context) {
+	var req struct {
+		Severity        string `json:"severity" binding:"required"`
+		Source          string `json:"source" binding:"required"`
+		Description     string `json:"description" binding:"required"`
+		AffectedService string `json:"affected_service" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request payload"})
+		return
+	}
+
+	inc := Incident{
+		ID:              "inc_" + fmt.Sprintf("%d", time.Now().UnixNano()),
+		Severity:        req.Severity,
+		Source:          req.Source,
+		Description:     req.Description,
+		AffectedService: req.AffectedService,
+		Status:          "OPEN",
+		CreatedAt:       time.Now(),
+		UpdatedAt:       time.Now(),
+	}
+
+	if globalDB != nil {
+		_, err := globalDB.Pool.Exec(c.Request.Context(),
+			"INSERT INTO incidents (id, severity, source, description, affected_service, status, assignee, resolution_notes, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())",
+			inc.ID, inc.Severity, inc.Source, inc.Description, inc.AffectedService, inc.Status, inc.Assignee, inc.ResolutionNotes)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist incident record"})
+			return
+		}
+	}
+
+	// Trigger alert state creation or publishing event over Kafka
+	if globalKafkaProducer != nil {
+		_ = globalKafkaProducer.Publish(c.Request.Context(), "velyxora-operational-alerts", inc.ID, types.KafkaEvent{
+			Type:      types.EventType("incident.created"),
+			Payload:   inc,
+			Timestamp: time.Now(),
+		})
+	}
+
+	c.JSON(http.StatusCreated, inc)
+}
+
+func handlePatchIncident(c *gin.Context) {
+	id := c.Param("id")
+	var req struct {
+		Status          string `json:"status"`
+		Assignee        string `json:"assignee"`
+		ResolutionNotes string `json:"resolution_notes"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid fields format"})
+		return
+	}
+
+	if globalDB == nil {
+		c.JSON(http.StatusOK, gin.H{"status": "UPDATED_MOCK"})
+		return
+	}
+
+	// Dynamic update query builder
+	query := "UPDATE incidents SET updated_at = NOW()"
+	args := []interface{}{}
+	argIdx := 1
+
+	if req.Status != "" {
+		query += fmt.Sprintf(", status = $%d", argIdx)
+		args = append(args, req.Status)
+		argIdx++
+	}
+	if req.Assignee != "" {
+		query += fmt.Sprintf(", assignee = $%d", argIdx)
+		args = append(args, req.Assignee)
+		argIdx++
+	}
+	if req.ResolutionNotes != "" {
+		query += fmt.Sprintf(", resolution_notes = $%d", argIdx)
+		args = append(args, req.ResolutionNotes)
+		argIdx++
+	}
+
+	query += fmt.Sprintf(" WHERE id = $%d", argIdx)
+	args = append(args, id)
+
+	_, err := globalDB.Pool.Exec(c.Request.Context(), query, args...)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update incident"})
+		return
+	}
+
+	// Emit updated telemetry event onto Kafka topic
+	if globalKafkaProducer != nil {
+		_ = globalKafkaProducer.Publish(c.Request.Context(), "velyxora-operational-alerts", id, types.KafkaEvent{
+			Type:      types.EventType("incident.updated"),
+			Payload:   gin.H{"incident_id": id, "status": req.Status},
+			Timestamp: time.Now(),
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Incident updated cleanly", "id": id})
+}
+
+// Security Audit Event Reader REST Handler
+type AuditLogEntry struct {
+	ID        string    `json:"id" db:"id"`
+	EventType string    `json:"event_type" db:"event_type"`
+	Severity  string    `json:"severity" db:"severity"`
+	UserID    string    `json:"user_id" db:"user_id"`
+	IPAddress string    `json:"ip_address" db:"ip_address"`
+	Details   string    `json:"details" db:"details"`
+	CreatedAt time.Time `json:"created_at" db:"created_at"`
+}
+
+func handleGetAuditEvents(c *gin.Context) {
+	events := []AuditLogEntry{}
+	if globalDB != nil {
+		rows, err := globalDB.Pool.Query(c.Request.Context(),
+			"SELECT id, event_type, severity, user_id, ip_address, details, created_at FROM security_audit_logs ORDER BY created_at DESC LIMIT 100")
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var ev AuditLogEntry
+				errScan := rows.Scan(&ev.ID, &ev.EventType, &ev.Severity, &ev.UserID, &ev.IPAddress, &ev.Details, &ev.CreatedAt)
+				if errScan == nil {
+					events = append(events, ev)
+				}
+			}
+		}
+	}
+	c.JSON(http.StatusOK, events)
 }
 
 // UnifiedAuthMiddleware combines API Key authentication and standard JWT session authentication

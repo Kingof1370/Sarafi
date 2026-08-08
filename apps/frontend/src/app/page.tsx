@@ -40,6 +40,36 @@ interface UserAPIKey {
   last_used_at?: string;
 }
 
+interface MetricValue {
+  name: string;
+  type: string;
+  value: number;
+  labels: Record<string, string>;
+  timestamp: string;
+}
+
+interface Incident {
+  id: string;
+  severity: string;
+  source: string;
+  description: string;
+  affected_service: string;
+  status: string;
+  assignee: string;
+  resolution_notes: string;
+  created_at: string;
+}
+
+interface AuditLogEntry {
+  id: string;
+  event_type: string;
+  severity: string;
+  user_id: string;
+  ip_address: string;
+  details: string;
+  created_at: string;
+}
+
 export default function Home() {
   const { user, accessToken, setAuth, logout } = useAuthStore();
   const [email, setEmail] = useState('');
@@ -48,12 +78,11 @@ export default function Home() {
   const [error, setError] = useState('');
   const [isRegister, setIsRegister] = useState(false);
 
-  // App Tabs: trading vs security
-  const [activeTab, setActiveTab] = useState<'trading' | 'security'>('trading');
+  // App Tabs: trading vs security vs observability
+  const [activeTab, setActiveTab] = useState<'trading' | 'security' | 'observability'>('trading');
 
   // Theme & Layout state
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
-  const [layoutMode, setLayoutMode] = useState<'classic' | 'pro'>('pro');
 
   // Trading States
   const [symbol, setSymbol] = useState('BTC-USDT');
@@ -74,6 +103,18 @@ export default function Home() {
   // Security Management States
   const [sessions, setSessions] = useState<UserSession[]>([]);
   const [apiKeys, setApiKeys] = useState<UserAPIKey[]>([]);
+
+  // Observability & Incidents telemetry states
+  const [healthStatus, setHealthStatus] = useState({ status: 'READY', components: { postgres: 'UP', redis: 'UP' } });
+  const [systemMetrics, setSystemMetrics] = useState<MetricValue[]>([]);
+  const [incidentsList, setIncidentsList] = useState<Incident[]>([]);
+  const [auditEvents, setAuditEvents] = useState<AuditLogEntry[]>([]);
+
+  // Create incident form
+  const [incSeverity, setIncSeverity] = useState('HIGH');
+  const [incSource, setIncSource] = useState('web-gateway');
+  const [incDesc, setIncDesc] = useState('');
+  const [incService, setIncService] = useState('api-gateway');
 
   // API Key creation form
   const [keyLabel, setKeyLabel] = useState('');
@@ -149,6 +190,58 @@ export default function Home() {
       console.error('Failed to fetch security state', err);
     }
   }, [accessToken]);
+
+  // Fetch actual observability details
+  const fetchObservabilityState = useCallback(async () => {
+    if (!accessToken) return;
+    try {
+      // 1. Fetch real-time liveness health status
+      const healthRes = await api.get('/health');
+      setHealthStatus(healthRes.data);
+
+      // 2. Fetch system resources and telemetry metrics list
+      const metricsRes = await api.get('/api/v1/system/metrics');
+      setSystemMetrics(metricsRes.data.metrics || []);
+
+      // 3. Fetch active incident board records
+      const incidentsRes = await api.get('/api/v1/incidents');
+      setIncidentsList(incidentsRes.data || []);
+
+      // 4. Fetch security/compliance audit trails
+      const auditRes = await api.get('/api/v1/audit/events');
+      setAuditEvents(auditRes.data || []);
+    } catch (err) {
+      console.error('Observability state fetch blocked (requires administrative RBAC permission)', err);
+    }
+  }, [accessToken]);
+
+  const submitCreateIncident = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      await api.post('/api/v1/incidents', {
+        severity: incSeverity,
+        source: incSource,
+        description: incDesc,
+        affected_service: incService,
+      });
+      setIncDesc('');
+      fetchObservabilityState();
+    } catch (err: any) {
+      alert(`Failed to log incident: ${err.response?.data?.error || err.message}`);
+    }
+  };
+
+  const updateIncidentStatus = async (id: string, newStatus: string) => {
+    try {
+      await api.patch(`/api/v1/incidents/${id}`, {
+        status: newStatus,
+        resolution_notes: `Status changed to ${newStatus} by administrator`,
+      });
+      fetchObservabilityState();
+    } catch (err: any) {
+      alert(`Failed to update incident: ${err.response?.data?.error || err.message}`);
+    }
+  };
 
   const revokeSession = async (id: string) => {
     try {
@@ -269,13 +362,15 @@ export default function Home() {
     if (accessToken) {
       fetchOrders();
       fetchSecurityState();
+      fetchObservabilityState();
       const interval = setInterval(() => {
         fetchOrders();
         fetchSecurityState();
+        fetchObservabilityState();
       }, 4000);
       return () => clearInterval(interval);
     }
-  }, [accessToken, fetchOrders, fetchSecurityState]);
+  }, [accessToken, fetchOrders, fetchSecurityState, fetchObservabilityState]);
 
   const totalCost = parseFloat(price) * parseFloat(quantity);
   const estimatedFees = totalCost * (side === 'BUY' ? 0.002 : 0.001);
@@ -300,10 +395,22 @@ export default function Home() {
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-1.5 bg-slate-900/60 p-1 rounded-lg border border-slate-800 text-xs">
             <button
-              onClick={() => setActiveTab(activeTab === 'trading' ? 'security' : 'trading')}
+              onClick={() => setActiveTab('trading')}
+              className={`px-3 py-1 rounded font-bold transition ${activeTab === 'trading' ? 'bg-cyan-500 text-slate-950' : 'text-slate-300 hover:bg-slate-800'}`}
+            >
+              📈 Trading
+            </button>
+            <button
+              onClick={() => setActiveTab('security')}
               className={`px-3 py-1 rounded font-bold transition ${activeTab === 'security' ? 'bg-cyan-500 text-slate-950' : 'text-slate-300 hover:bg-slate-800'}`}
             >
-              {activeTab === 'trading' ? '🛡️ Security Center' : '📈 Back to Trading'}
+              🛡️ Security
+            </button>
+            <button
+              onClick={() => setActiveTab('observability')}
+              className={`px-3 py-1 rounded font-bold transition ${activeTab === 'observability' ? 'bg-cyan-500 text-slate-950' : 'text-slate-300 hover:bg-slate-800'}`}
+            >
+              📊 System Ops
             </button>
             <button onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} className="px-2 py-1 hover:bg-slate-800 rounded text-slate-300">
               {theme === 'dark' ? '☀️' : '🌙'}
@@ -774,6 +881,144 @@ export default function Home() {
                 </div>
               </div>
             )}
+          </section>
+        </div>
+      )}
+
+      {/* 3. System Observability and Operations Tab (P0010 Real telemetry integration) */}
+      {activeTab === 'observability' && (
+        <div className="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6">
+          {/* Liveness & System Health Check State */}
+          <section className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-xl col-span-1 text-xs">
+            <h3 className="text-base font-bold text-cyan-400 mb-4">📊 System Telemetry & Liveness</h3>
+            <div className="space-y-4">
+              <div className="bg-slate-950 p-3 rounded-lg border border-slate-800">
+                <span className="text-[10px] text-slate-500 font-bold uppercase">Overall State</span>
+                <span className={`block text-lg font-extrabold mt-1 ${healthStatus.status === 'READY' || healthStatus.status === 'LIVE' ? 'text-emerald-400' : 'text-amber-500'}`}>
+                  {healthStatus.status}
+                </span>
+              </div>
+
+              <div className="space-y-2">
+                <span className="text-[10px] text-slate-500 font-bold uppercase block">Core Dependencies</span>
+                <div className="flex justify-between p-2.5 bg-slate-950 rounded border border-slate-800/80">
+                  <span>PostgreSQL DB</span>
+                  <span className={`font-bold ${healthStatus.components?.postgres === 'UP' ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    {healthStatus.components?.postgres}
+                  </span>
+                </div>
+                <div className="flex justify-between p-2.5 bg-slate-950 rounded border border-slate-800/80">
+                  <span>Redis Store</span>
+                  <span className={`font-bold ${healthStatus.components?.redis === 'UP' ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    {healthStatus.components?.redis}
+                  </span>
+                </div>
+              </div>
+
+              {/* Dynamic Prometheus Telemetry Metrics View */}
+              <div className="border-t border-slate-800 pt-3">
+                <span className="text-[10px] text-slate-500 font-bold uppercase block mb-2">Metrics Snapshot</span>
+                <div className="space-y-1.5 max-h-56 overflow-y-auto font-mono text-[10px]">
+                  {systemMetrics.length === 0 ? (
+                    <p className="text-slate-600 text-center py-4">No logged performance metrics available</p>
+                  ) : (
+                    systemMetrics.map((m, idx) => (
+                      <div key={idx} className="flex justify-between border-b border-slate-800/40 pb-1">
+                        <span className="text-slate-400 truncate max-w-[180px]">{m.name}</span>
+                        <span className="text-cyan-400 font-bold">{m.value}</span>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            </div>
+          </section>
+
+          {/* Active Incident Management Board */}
+          <section className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-xl col-span-1 text-xs">
+            <h3 className="text-base font-bold text-cyan-400 mb-4">🚨 Corporate Incident Response Board</h3>
+
+            {/* Create incident form */}
+            <form onSubmit={submitCreateIncident} className="space-y-3 mb-4 bg-slate-950 p-3 rounded-lg border border-slate-800">
+              <span className="text-[10px] text-slate-400 font-bold uppercase block">File Critical Alert</span>
+              <div className="grid grid-cols-2 gap-2">
+                <select value={incSeverity} onChange={(e) => setIncSeverity(e.target.value)} className="bg-slate-900 border border-slate-800 p-1 rounded text-[11px]">
+                  <option value="CRITICAL">CRITICAL</option>
+                  <option value="HIGH">HIGH</option>
+                  <option value="MEDIUM">MEDIUM</option>
+                  <option value="LOW">LOW</option>
+                </select>
+                <select value={incService} onChange={(e) => setIncService(e.target.value)} className="bg-slate-900 border border-slate-800 p-1 rounded text-[11px]">
+                  <option value="api-gateway">api-gateway</option>
+                  <option value="matching-engine">matching-engine</option>
+                  <option value="wallet-service">wallet-service</option>
+                </select>
+              </div>
+              <input
+                type="text"
+                placeholder="Alert description details..."
+                value={incDesc}
+                onChange={(e) => setIncDesc(e.target.value)}
+                className="w-full bg-slate-900 border border-slate-800 p-1.5 rounded text-[11px] focus:outline-none"
+                required
+              />
+              <button type="submit" className="w-full bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold py-1 rounded text-[11px]">
+                Create Incident
+              </button>
+            </form>
+
+            <div className="space-y-3 overflow-y-auto max-h-[300px]">
+              {incidentsList.length === 0 ? (
+                <p className="text-slate-600 text-center py-8">No logged incidents found</p>
+              ) : (
+                incidentsList.map((inc) => (
+                  <div key={inc.id} className="p-3 bg-slate-950 border border-slate-800 rounded-lg">
+                    <div className="flex justify-between items-center font-bold">
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded ${inc.severity === 'CRITICAL' ? 'bg-rose-950 text-rose-400' : 'bg-amber-950 text-amber-400'}`}>
+                        {inc.severity}
+                      </span>
+                      <span className="text-slate-500 text-[10px]">{inc.id}</span>
+                    </div>
+                    <p className="text-slate-300 font-semibold mt-1">{inc.description}</p>
+                    <p className="text-[10px] text-slate-500 mt-0.5">Service: {inc.affected_service} | Source: {inc.source}</p>
+
+                    <div className="flex justify-between items-center mt-3 border-t border-slate-800/80 pt-2">
+                      <span className="text-[10px] text-cyan-400 font-bold">{inc.status}</span>
+                      {inc.status === 'OPEN' && (
+                        <div className="flex gap-1">
+                          <button onClick={() => updateIncidentStatus(inc.id, 'ACKNOWLEDGED')} className="bg-slate-900 border border-slate-800 px-1 py-0.5 rounded text-[10px] hover:bg-slate-800">Ack</button>
+                          <button onClick={() => updateIncidentStatus(inc.id, 'RESOLVED')} className="bg-emerald-950 text-emerald-400 px-1 py-0.5 rounded text-[10px] hover:bg-emerald-900">Resolve</button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </section>
+
+          {/* Secure Administrative Compliance Audit Log Stream */}
+          <section className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-xl col-span-1 text-xs">
+            <h3 className="text-base font-bold text-cyan-400 mb-4">🛡️ Secure Compliance Audit Trail</h3>
+            <div className="space-y-3 overflow-y-auto max-h-[480px]">
+              {auditEvents.length === 0 ? (
+                <p className="text-slate-600 text-center py-10">No secure audit events registered</p>
+              ) : (
+                auditEvents.map((ev) => (
+                  <div key={ev.id} className="p-3 bg-slate-950 border border-slate-800 rounded-lg font-mono text-[10px]">
+                    <div className="flex justify-between text-slate-500">
+                      <span className="font-bold text-slate-300">{ev.event_type}</span>
+                      <span>{ev.id}</span>
+                    </div>
+                    <p className="text-slate-400 mt-1.5">{ev.details}</p>
+                    <div className="flex justify-between text-[9px] text-slate-600 mt-2">
+                      <span>IP: {ev.ip_address}</span>
+                      <span>{new Date(ev.created_at).toLocaleString()}</span>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
           </section>
         </div>
       )}

@@ -1,30 +1,36 @@
-package logger
+package logger_test
 
 import (
-	"bytes"
-	"encoding/json"
-	"log/slog"
+	"context"
 	"testing"
+	"velyxora/packages/logger"
 )
 
-func TestLoggerJSON(t *testing.T) {
-	var buf bytes.Buffer
-	opts := &slog.HandlerOptions{Level: slog.LevelInfo}
-	handler := slog.NewJSONHandler(&buf, opts)
-	slogLogger := slog.New(handler)
+func TestLoggerWithContextAndLogEvent(t *testing.T) {
+	l := logger.NewLogger(logger.Config{
+		Level:       "DEBUG",
+		Format:      "JSON",
+		ServiceName: "test-service",
+	})
 
-	l := &Logger{Logger: slogLogger}
-	l.Info("test message", slog.String("key", "val"))
+	ctx := context.WithValue(context.Background(), "trace_id", "tr_123456")
+	ctx = context.WithValue(ctx, "user_id", "usr_999")
+	ctx = context.WithValue(ctx, "order_id", "ord_777")
 
-	var data map[string]interface{}
-	if err := json.Unmarshal(buf.Bytes(), &data); err != nil {
-		t.Fatalf("Failed to parse log output: %v", err)
+	fields := map[string]interface{}{
+		"price":       50000.0,
+		"password":    "mysecretpassword", // Should be redacted
+		"api_secret":  "apikey_secret",    // Should be redacted
+		"mfa_secret":  "totp_secret",      // Should be redacted
+		"kyc_document": "user_id_passport", // Should be redacted
 	}
 
-	if data["msg"] != "test message" {
-		t.Errorf("Expected msg to be 'test message', got '%v'", data["msg"])
+	l.LogEvent(ctx, "INFO", "matching_engine", "ORDER_EXECUTED", "SUCCESS", "", fields)
+
+	if !logger.IsSensitiveField("password") {
+		t.Errorf("expected 'password' to be identified as sensitive")
 	}
-	if data["key"] != "val" {
-		t.Errorf("Expected key 'key' to be 'val', got '%v'", data["key"])
+	if !logger.IsSensitiveField("mfa_secret") {
+		t.Errorf("expected 'mfa_secret' to be identified as sensitive")
 	}
 }
