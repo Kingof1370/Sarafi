@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"fmt"
 	"encoding/hex"
 	"encoding/json"
 	"io"
@@ -552,6 +553,15 @@ func handleCreateOrder(c *gin.Context) {
 		if !VerifyMFAProtection(c, userClaims.UserID) {
 			return
 		}
+	}
+
+	// Synchronous compliance verification gate for OMS order placement (P0009)
+	if err := VerifyTradingCompliance(c.Request.Context(), userClaims.UserID, order.Symbol, order.Side, order.Price, order.Quantity); err != nil {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error": fmt.Sprintf("OMS Order Compliance Blocked: %v", err),
+			"compliance_code": "COMPLIANCE_BLOCKED",
+		})
+		return
 	}
 
 	// Route order through validated pipeline

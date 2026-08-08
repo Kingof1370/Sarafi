@@ -658,6 +658,151 @@ var schemaMigrations = []Migration{
 			CREATE INDEX IF NOT EXISTS idx_candles_query ON candles(symbol, interval, open_time DESC);
 		`,
 	},
+	{
+		ID:   37,
+		Name: "create_p0009_compliance_tables",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS kyc_profiles (
+				user_id VARCHAR(255) PRIMARY KEY,
+				tier VARCHAR(50) NOT NULL,
+				status VARCHAR(50) NOT NULL,
+				provider_ref VARCHAR(255) NOT NULL,
+				document_metadata TEXT NOT NULL,
+				rejection_reason TEXT NOT NULL,
+				attempts INT DEFAULT 0 NOT NULL,
+				verified_at TIMESTAMP,
+				expires_at TIMESTAMP,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+			);
+
+			CREATE TABLE IF NOT EXISTS kyc_limits (
+				tier VARCHAR(50) PRIMARY KEY,
+				deposit_limit_daily DECIMAL(36, 18) NOT NULL,
+				deposit_limit_monthly DECIMAL(36, 18) NOT NULL,
+				withdrawal_limit_daily DECIMAL(36, 18) NOT NULL,
+				withdrawal_limit_monthly DECIMAL(36, 18) NOT NULL,
+				trading_limit_daily DECIMAL(36, 18) NOT NULL,
+				api_limit_rate INT NOT NULL
+			);
+
+			CREATE TABLE IF NOT EXISTS aml_rules (
+				id VARCHAR(255) PRIMARY KEY,
+				name VARCHAR(255) NOT NULL,
+				description TEXT NOT NULL,
+				rule_type VARCHAR(100) NOT NULL,
+				parameter_key VARCHAR(100) NOT NULL,
+				parameter_value DECIMAL(36, 18) NOT NULL,
+				is_active BOOLEAN DEFAULT TRUE NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+
+			CREATE TABLE IF NOT EXISTS compliance_alerts (
+				id VARCHAR(255) PRIMARY KEY,
+				user_id VARCHAR(255) NOT NULL,
+				transaction_id VARCHAR(255) DEFAULT '' NOT NULL,
+				rule_triggered VARCHAR(255) NOT NULL,
+				risk_score DECIMAL(5, 4) NOT NULL,
+				evidence TEXT NOT NULL,
+				severity VARCHAR(50) NOT NULL,
+				status VARCHAR(50) NOT NULL,
+				reviewer VARCHAR(255) DEFAULT '' NOT NULL,
+				resolution_reason TEXT DEFAULT '' NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+			);
+
+			CREATE TABLE IF NOT EXISTS risk_evaluations (
+				id VARCHAR(255) PRIMARY KEY,
+				user_id VARCHAR(255) NOT NULL,
+				score DECIMAL(5, 4) NOT NULL,
+				risk_level VARCHAR(50) NOT NULL,
+				contributing_rules TEXT NOT NULL,
+				evaluation_version VARCHAR(50) NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+			);
+
+			CREATE TABLE IF NOT EXISTS sanctions_screenings (
+				id VARCHAR(255) PRIMARY KEY,
+				target_type VARCHAR(100) NOT NULL,
+				target_value VARCHAR(255) NOT NULL,
+				provider VARCHAR(100) NOT NULL,
+				status VARCHAR(50) NOT NULL,
+				details TEXT NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+
+			CREATE TABLE IF NOT EXISTS travel_rule_records (
+				id VARCHAR(255) PRIMARY KEY,
+				transaction_id VARCHAR(255) NOT NULL,
+				originator_name VARCHAR(255) NOT NULL,
+				originator_address VARCHAR(255) NOT NULL,
+				originator_account VARCHAR(255) NOT NULL,
+				beneficiary_name VARCHAR(255) NOT NULL,
+				beneficiary_address VARCHAR(255) NOT NULL,
+				beneficiary_account VARCHAR(255) NOT NULL,
+				provider VARCHAR(100) NOT NULL,
+				status VARCHAR(50) NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+
+			CREATE TABLE IF NOT EXISTS account_restrictions (
+				user_id VARCHAR(255) PRIMARY KEY,
+				restriction_type VARCHAR(100) NOT NULL,
+				reason TEXT NOT NULL,
+				created_by VARCHAR(255) NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+			);
+
+			CREATE TABLE IF NOT EXISTS compliance_cases (
+				id VARCHAR(255) PRIMARY KEY,
+				user_id VARCHAR(255) NOT NULL,
+				status VARCHAR(50) NOT NULL,
+				investigator_id VARCHAR(255) DEFAULT '' NOT NULL,
+				resolution TEXT DEFAULT '' NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+			);
+
+			CREATE TABLE IF NOT EXISTS compliance_case_alerts (
+				case_id VARCHAR(255) NOT NULL,
+				alert_id VARCHAR(255) NOT NULL,
+				PRIMARY KEY (case_id, alert_id),
+				FOREIGN KEY (case_id) REFERENCES compliance_cases(id) ON DELETE CASCADE,
+				FOREIGN KEY (alert_id) REFERENCES compliance_alerts(id) ON DELETE CASCADE
+			);
+
+			CREATE TABLE IF NOT EXISTS compliance_case_notes (
+				id VARCHAR(255) PRIMARY KEY,
+				case_id VARCHAR(255) NOT NULL,
+				author_id VARCHAR(255) NOT NULL,
+				note TEXT NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				FOREIGN KEY (case_id) REFERENCES compliance_cases(id) ON DELETE CASCADE
+			);
+
+			-- Seed default KYC limits
+			INSERT INTO kyc_limits (tier, deposit_limit_daily, deposit_limit_monthly, withdrawal_limit_daily, withdrawal_limit_monthly, trading_limit_daily, api_limit_rate) VALUES
+				('BASIC', 1000.0, 5000.0, 1000.0, 5000.0, 5000.0, 60),
+				('STANDARD', 10000.0, 50000.0, 10000.0, 50000.0, 50000.0, 120),
+				('ADVANCED', 100000.0, 500000.0, 100000.0, 500000.0, 500000.0, 300),
+				('INSTITUTIONAL', 1000000.0, 10000000.0, 1000000.0, 10000000.0, 10000000.0, 600)
+			ON CONFLICT (tier) DO NOTHING;
+
+			-- Seed default configurable AML rules
+			INSERT INTO aml_rules (id, name, description, rule_type, parameter_key, parameter_value, is_active) VALUES
+				('aml_rule_velocity_tx', 'High Velocity Rule', 'Triggers alert when too many transactions occur within short timeframes', 'VELOCITY', 'tx_count_1h', 5.0, true),
+				('aml_rule_unusual_amount', 'Unusual Amount Rule', 'Triggers alert when a single transaction amount exceeds threshold', 'THRESHOLD', 'max_single_amount', 5000.0, true),
+				('aml_rule_failed_tx', 'Failed Transactions Rule', 'Triggers alert when consecutive failed transactions exceed limit', 'FAILED_TX', 'failed_count_1h', 3.0, true)
+			ON CONFLICT (id) DO NOTHING;
+		`,
+	},
 }
 
 // RunMigrations executes schema migration steps on the pgx connection pool

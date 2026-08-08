@@ -27,6 +27,13 @@ type Client struct {
 	unhealthy bool
 }
 
+// write is a thread-safe wrapper for writing messages to the websocket connection
+func (c *Client) write(messageType int, data []byte) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.conn.WriteMessage(messageType, data)
+}
+
 type WSMessage struct {
 	Action  string          `json:"action"`  // "subscribe", "unsubscribe", "ping"
 	Channel string          `json:"channel"` // e.g. "market:ticker", "market:trades"
@@ -82,7 +89,7 @@ func (g *WSGateway) BroadcastToChannel(channel string, message []byte) {
 				// Mark unhealthy and disconnect safely.
 				client.unhealthy = true
 				go func(c *Client) {
-					_ = c.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "Slow Consumer Protection Triggered"))
+					_ = c.write(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "Slow Consumer Protection Triggered"))
 					_ = c.conn.Close()
 				}(client)
 			}
@@ -172,13 +179,13 @@ func (g *WSGateway) writeLoop(c *Client) {
 		select {
 		case msg, ok := <-c.send:
 			if !ok {
-				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
+				_ = c.write(websocket.CloseMessage, []byte{})
 				return
 			}
-			c.conn.WriteMessage(websocket.TextMessage, msg)
+			_ = c.write(websocket.TextMessage, msg)
 		case <-ticker.C:
-			c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+			_ = c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if err := c.write(websocket.PingMessage, nil); err != nil {
 				return
 			}
 		}
