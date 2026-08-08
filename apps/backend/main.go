@@ -36,6 +36,7 @@ var globalDB *database.DB
 var globalRedis *common.RedisClient
 var globalKafkaProducer *common.KafkaProducer
 var globalJWTSecret string
+var globalWSGateway *WSGateway
 
 func main() {
 	// 1. Initialize Log
@@ -102,8 +103,12 @@ func main() {
 	defer kafkaProducer.Close()
 	log.Info("Kafka Producer registered.")
 
+	// Start asynchronous Market Data Consumers
+	startMarketDataConsumers(cfg.KafkaBrokers)
+
 	// 6.5 Setup WebSocket Gateway (P005 real-time core)
 	wsGateway := NewWSGateway(cfg.JWTSecret)
+	globalWSGateway = wsGateway
 	go wsGateway.Run()
 
 	// 7. Bootstrap Router
@@ -200,6 +205,16 @@ func main() {
 	{
 		// Register API Key management routes
 		RegisterAPIKeyHandlers(v1)
+
+		// Public Market Data REST endpoints
+		marketGroup := v1.Group("/market")
+		{
+			marketGroup.GET("/ticker", handleGetMarketTicker)
+			marketGroup.GET("/depth", handleGetMarketDepth)
+			marketGroup.GET("/trades", handleGetMarketRecentTrades)
+			marketGroup.GET("/candles", handleGetMarketCandles)
+			marketGroup.GET("/stats", handleGetMarketStats)
+		}
 
 		// OMS Handlers (Authenticated)
 		omsGroup := v1.Group("")

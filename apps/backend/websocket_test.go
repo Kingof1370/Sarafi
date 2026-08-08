@@ -73,3 +73,66 @@ func TestWSGatewaySubscriptionFlow(t *testing.T) {
 		t.Errorf("Expected price '52000.5' in broadcast payload, got %s", string(tickMsg))
 	}
 }
+
+func TestWSGatewaySlowConsumer(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	secret := "testsecret12345678"
+	gateway := NewWSGateway(secret)
+	go gateway.Run()
+
+	r := gin.New()
+	r.GET("/ws", gateway.HandleConnection)
+
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws"
+	ws, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("Failed to establish WS dialer handshake: %v", err)
+	}
+	defer ws.Close()
+
+	// Subscribe to trades
+	subMsg := WSMessage{Action: "subscribe", Channel: "market:trades"}
+	subPayload, _ := json.Marshal(subMsg)
+	_ = ws.WriteMessage(websocket.TextMessage, subPayload)
+
+	_, _, err = ws.ReadMessage() // read subscription response
+	if err != nil {
+		t.Fatalf("Failed to read sub response: %v", err)
+	}
+
+	// Find the registered client in the gateway and fill its queue
+	var targetClient *Client
+	gateway.mu.RLock()
+	for c := range gateway.clients {
+		targetClient = c
+		break
+	}
+	gateway.mu.RUnlock()
+
+	if targetClient == nil {
+		t.Fatalf("Failed to find registered client in gateway")
+	}
+
+	// Squeeze client's outbound channel until full (it's bounded to 256)
+	for i := 0; i < 300; i++ {
+		gateway.BroadcastToChannel("market:trades", []byte(`{"trade":"test"}`))
+	}
+
+	// Read in a loop until we get an error (due to closed connection) or read limit exceeded
+	closed := false
+	for i := 0; i < 400; i++ {
+		ws.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+		_, _, err = ws.ReadMessage()
+		if err != nil {
+			closed = true
+			break
+		}
+	}
+
+	if !closed {
+		t.Errorf("Expected connection to be closed by slow-consumer protection, but read did not fail")
+	}
+}

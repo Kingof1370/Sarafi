@@ -5,22 +5,35 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"velyxora/apps/matching-engine/engine"
+	"velyxora/packages/common"
 	"velyxora/packages/security"
+	"velyxora/packages/types"
 )
 
 // Global OMSRouter instance for the API Gateway handlers
 var globalOMSRouter *engine.OMSRouter
 var globalMarketServices *engine.MarketServices
 var globalMFATradingThreshold float64 = 100000.0
+var globalCandleEngine *engine.CandleEngine
+var candleEngineOnce sync.Once
+
+func getCandleEngine() *engine.CandleEngine {
+	candleEngineOnce.Do(func() {
+		globalCandleEngine = engine.NewCandleEngine(globalDB, globalRedis)
+	})
+	return globalCandleEngine
+}
 
 func init() {
 	// Initialize full modular trading core engine stack on start
@@ -35,12 +48,167 @@ func init() {
 	globalOMSRouter = engine.NewOMSRouter(sm, val, risk, matcher, exec, settle)
 	globalMarketServices = engine.NewMarketServices()
 
+	globalOMSRouter.OnTradeMatched = func(symbol string, price, quantity float64, timestamp time.Time) {
+		// Non-blocking: publish trade match to Kafka!
+		go publishTradeToKafka(symbol, price, quantity, timestamp)
+	}
+
+	globalOMSRouter.OnOrderBookChanged = func(symbol string) {
+		matcher := globalOMSRouter.GetMatcher()
+		if matcher != nil {
+			depth := matcher.GetL2Depth(20)
+			go publishDepthToKafka(symbol, depth)
+		}
+	}
+
 	// Parse MFA Trading Threshold from environment for professional configuration
 	if threshEnv := os.Getenv("MFA_TRADING_THRESHOLD"); threshEnv != "" {
 		if val, err := strconv.ParseFloat(threshEnv, 64); err == nil {
 			globalMFATradingThreshold = val
 		}
 	}
+}
+
+func publishTradeToKafka(symbol string, price, quantity float64, timestamp time.Time) {
+	if globalKafkaProducer == nil {
+		return
+	}
+	tradePayload := gin.H{
+		"symbol":    symbol,
+		"price":     price,
+		"quantity":  quantity,
+		"timestamp": timestamp.UnixNano() / 1e6,
+	}
+	event := types.KafkaEvent{
+		Type:      types.EventOrderMatch,
+		Payload:   tradePayload,
+		Timestamp: timestamp,
+	}
+	_ = globalKafkaProducer.Publish(context.Background(), "velyxora-trades", symbol, event)
+}
+
+func publishDepthToKafka(symbol string, depth *types.OrderBookL2) {
+	if globalKafkaProducer == nil {
+		return
+	}
+	event := types.KafkaEvent{
+		Type:      types.EventBalanceUpdate, // reuse type structure
+		Payload:   depth,
+		Timestamp: depth.Timestamp,
+	}
+	_ = globalKafkaProducer.Publish(context.Background(), "velyxora-depth", symbol, event)
+}
+
+func startMarketDataConsumers(brokers []string) {
+	tradesConsumer := common.NewKafkaConsumer(brokers, "velyxora-trades", "api-gateway-market-trades-group")
+	depthConsumer := common.NewKafkaConsumer(brokers, "velyxora-depth", "api-gateway-market-depth-group")
+
+	// Consume trades asynchronously
+	go func() {
+		ctx := context.Background()
+		_ = tradesConsumer.Consume(ctx, func(key string, value []byte) error {
+			var event types.KafkaEvent
+			if err := json.Unmarshal(value, &event); err != nil {
+				return nil
+			}
+
+			// Extract trade payload
+			dataBytes, err := json.Marshal(event.Payload)
+			if err != nil {
+				return nil
+			}
+
+			var payload struct {
+				Symbol    string    `json:"symbol"`
+				Price     float64   `json:"price"`
+				Quantity  float64   `json:"quantity"`
+				Timestamp int64     `json:"timestamp"`
+			}
+			if err := json.Unmarshal(dataBytes, &payload); err != nil {
+				return nil
+			}
+
+			// 1. Process Candle Update (Postgres & Redis)
+			tTime := time.Unix(0, payload.Timestamp*1e6)
+			_ = getCandleEngine().ProcessTrade(ctx, payload.Symbol, payload.Price, payload.Quantity, tTime)
+
+			// 2. Record trade in Market Services
+			globalMarketServices.RecordTrade(payload.Symbol, payload.Price, payload.Quantity)
+
+			// 3. Broadcast Trade and Ticker via WS
+			broadcastTradeAndTicker(payload.Symbol, payload.Price, payload.Quantity, tTime)
+
+			return nil
+		})
+	}()
+
+	// Consume depth asynchronously
+	go func() {
+		ctx := context.Background()
+		_ = depthConsumer.Consume(ctx, func(key string, value []byte) error {
+			var event types.KafkaEvent
+			if err := json.Unmarshal(value, &event); err != nil {
+				return nil
+			}
+
+			dataBytes, err := json.Marshal(event.Payload)
+			if err != nil {
+				return nil
+			}
+
+			var depth types.OrderBookL2
+			if err := json.Unmarshal(dataBytes, &depth); err != nil {
+				return nil
+			}
+
+			// Broadcast depth to WS clients
+			broadcastDepthWS(depth.Symbol, &depth)
+
+			return nil
+		})
+	}()
+}
+
+func broadcastTradeAndTicker(symbol string, price, quantity float64, timestamp time.Time) {
+	if globalWSGateway == nil {
+		return
+	}
+
+	// 1. Broadcast Trade
+	tradeData := gin.H{
+		"symbol":    symbol,
+		"price":     price,
+		"quantity":  quantity,
+		"timestamp": timestamp.UnixNano() / 1e6,
+	}
+	tradeMsg, _ := json.Marshal(gin.H{
+		"event":   "trade",
+		"channel": "market:trades",
+		"data":    tradeData,
+	})
+	globalWSGateway.BroadcastToChannel("market:trades", tradeMsg)
+
+	// 2. Broadcast Ticker
+	ticker := globalMarketServices.GetTicker(symbol)
+	tickerMsg, _ := json.Marshal(gin.H{
+		"event":   "ticker",
+		"channel": "market:ticker",
+		"data":    ticker,
+	})
+	globalWSGateway.BroadcastToChannel("market:ticker", tickerMsg)
+}
+
+func broadcastDepthWS(symbol string, depth *types.OrderBookL2) {
+	if globalWSGateway == nil {
+		return
+	}
+
+	depthMsg, _ := json.Marshal(gin.H{
+		"event":   "depth",
+		"channel": "market:depth",
+		"data":    depth,
+	})
+	globalWSGateway.BroadcastToChannel("market:depth", depthMsg)
 }
 
 // RegisterOMSHandlers binds the advanced trading API handlers to the API Gateway router
@@ -715,4 +883,83 @@ func VerifyMFAProtection(c *gin.Context, userID string) bool {
 		}
 	}
 	return true
+}
+
+func handleGetMarketTicker(c *gin.Context) {
+	symbol := c.DefaultQuery("symbol", "BTC-USDT")
+	ticker := globalMarketServices.GetTicker(strings.ToUpper(symbol))
+	c.JSON(http.StatusOK, ticker)
+}
+
+func handleGetMarketDepth(c *gin.Context) {
+	symbol := c.DefaultQuery("symbol", "BTC-USDT")
+	limitStr := c.DefaultQuery("limit", "100")
+	limit, _ := strconv.Atoi(limitStr)
+	if limit <= 0 {
+		limit = 100
+	}
+
+	matcher := globalOMSRouter.GetMatcher()
+	var depth *types.OrderBookL2
+
+	if matcher != nil && strings.ToUpper(symbol) == strings.ToUpper(matcher.Symbol) {
+		depth = matcher.GetL2Depth(limit)
+	} else {
+		depth = &types.OrderBookL2{
+			Symbol:    symbol,
+			Bids:      []types.OrderBookLevel{},
+			Asks:      []types.OrderBookLevel{},
+			Sequence:  0,
+			Timestamp: time.Now(),
+		}
+	}
+	c.JSON(http.StatusOK, depth)
+}
+
+func handleGetMarketRecentTrades(c *gin.Context) {
+	trades := globalOMSRouter.GetRecentTrades()
+	if trades == nil {
+		trades = []*engine.Execution{}
+	}
+	c.JSON(http.StatusOK, trades)
+}
+
+func handleGetMarketCandles(c *gin.Context) {
+	symbol := c.DefaultQuery("symbol", "BTC-USDT")
+	interval := c.DefaultQuery("interval", "1m")
+	limitStr := c.DefaultQuery("limit", "100")
+	limit, _ := strconv.Atoi(limitStr)
+
+	candles, err := getCandleEngine().GetCandles(c.Request.Context(), strings.ToUpper(symbol), interval, limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if candles == nil {
+		candles = []engine.Candle{}
+	}
+	c.JSON(http.StatusOK, candles)
+}
+
+func handleGetMarketStats(c *gin.Context) {
+	symbol := c.DefaultQuery("symbol", "BTC-USDT")
+	matcher := globalOMSRouter.GetMatcher()
+
+	if matcher != nil && strings.ToUpper(symbol) == strings.ToUpper(matcher.Symbol) {
+		le := engine.NewLiquidityEngine()
+		stats := le.AnalyzeDepth(matcher)
+		c.JSON(http.StatusOK, stats)
+	} else {
+		c.JSON(http.StatusOK, gin.H{
+			"symbol":              symbol,
+			"best_bid":           0.0,
+			"best_ask":           0.0,
+			"spread":              0.0,
+			"mid_price":           0.0,
+			"weighted_mid_price":  0.0,
+			"depth_imbalance":     0.0,
+			"market_health_score": 0.0,
+			"timestamp":           time.Now(),
+		})
+	}
 }

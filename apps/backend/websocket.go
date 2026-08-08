@@ -24,6 +24,7 @@ type Client struct {
 	userID    string
 	channels  map[string]bool
 	mu        sync.Mutex
+	unhealthy bool
 }
 
 type WSMessage struct {
@@ -73,11 +74,17 @@ func (g *WSGateway) BroadcastToChannel(channel string, message []byte) {
 	defer g.mu.RUnlock()
 	for client := range g.clients {
 		client.mu.Lock()
-		if client.channels[channel] {
+		if client.channels[channel] && !client.unhealthy {
 			select {
 			case client.send <- message:
 			default:
-				// Do not block gateway loops on dead socket sends
+				// Outbound queue is full! Client is too slow to process high-frequency stream.
+				// Mark unhealthy and disconnect safely.
+				client.unhealthy = true
+				go func(c *Client) {
+					_ = c.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "Slow Consumer Protection Triggered"))
+					_ = c.conn.Close()
+				}(client)
 			}
 		}
 		client.mu.Unlock()

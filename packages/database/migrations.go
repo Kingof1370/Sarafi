@@ -636,6 +636,28 @@ var schemaMigrations = []Migration{
 			CREATE INDEX IF NOT EXISTS idx_idempotency_user ON idempotency_records(user_id);
 		`,
 	},
+	{
+		ID:   36,
+		Name: "create_candles_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS candles (
+				id VARCHAR(255) PRIMARY KEY,
+				symbol VARCHAR(100) NOT NULL,
+				interval VARCHAR(50) NOT NULL,
+				open DECIMAL(36, 18) NOT NULL,
+				high DECIMAL(36, 18) NOT NULL,
+				low DECIMAL(36, 18) NOT NULL,
+				close DECIMAL(36, 18) NOT NULL,
+				base_volume DECIMAL(36, 18) NOT NULL,
+				quote_volume DECIMAL(36, 18) NOT NULL,
+				trade_count INT NOT NULL,
+				open_time TIMESTAMP NOT NULL,
+				close_time TIMESTAMP NOT NULL
+			);
+			CREATE UNIQUE INDEX IF NOT EXISTS idx_candles_uniq ON candles(symbol, interval, open_time);
+			CREATE INDEX IF NOT EXISTS idx_candles_query ON candles(symbol, interval, open_time DESC);
+		`,
+	},
 }
 
 // RunMigrations executes schema migration steps on the pgx connection pool
