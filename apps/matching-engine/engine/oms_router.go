@@ -4,19 +4,22 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 	"velyxora/packages/database"
 	"velyxora/packages/types"
 )
 
 // OMSRouter coordinates validations, risk locks, matching execution, and cancellations
 type OMSRouter struct {
-	mu           sync.RWMutex
-	stateMachine *OMSStateMachine
-	validator    *OMSValidator
-	risk         *RiskEngine
-	matcher      *Matcher
-	execution    *ExecutionEngine
-	settlement   *SettlementEngine
+	mu                 sync.RWMutex
+	stateMachine       *OMSStateMachine
+	validator          *OMSValidator
+	risk               *RiskEngine
+	matcher            *Matcher
+	execution          *ExecutionEngine
+	settlement         *SettlementEngine
+	OnTradeMatched     func(symbol string, price, quantity float64, timestamp time.Time)
+	OnOrderBookChanged func(symbol string)
 }
 
 // NewOMSRouter initializes the routing supervisor
@@ -81,6 +84,23 @@ func (or *OMSRouter) ProcessIncomingOrder(ctx context.Context, order *AdvancedOr
 	_, _ = or.stateMachine.TransitionOrder(order.ID, StatusOMS_Accepted, "ACCEPT", ip, device, "Accepted by Gateway")
 
 	// 6. Route to Matching Engine Core
+	isStop := (order.Type == "STOP" || order.Type == "STOP_LIMIT" || order.Type == "TAKE_PROFIT" || order.Type == "TAKE_PROFIT_LIMIT")
+
+	if isStop {
+		triggerPrice := order.StopPrice
+		if triggerPrice == 0 {
+			triggerPrice = order.Price
+		}
+		legacyOrder.Price = triggerPrice
+
+		or.matcher.AddStopOrder(legacyOrder)
+		_, _ = or.stateMachine.TransitionOrder(order.ID, StatusOMS_Queued, "QUEUE", ip, device, "Registered stop order trigger")
+		if or.OnOrderBookChanged != nil {
+			or.OnOrderBookChanged(order.Symbol)
+		}
+		return nil
+	}
+
 	_, _ = or.stateMachine.TransitionOrder(order.ID, StatusOMS_Queued, "QUEUE", ip, device, "Queued inside the limit book")
 
 	matches := or.matcher.MatchOrder(legacyOrder)
@@ -91,6 +111,13 @@ func (or *OMSRouter) ProcessIncomingOrder(ctx context.Context, order *AdvancedOr
 		for _, exec := range executions {
 			// Persist balance adjustments via asynchronous queue clearing
 			or.settlement.QueueSettlement(exec, baseAsset, quoteAsset)
+		}
+
+		// Trigger Trade Callback for Tickers/Candles/WebSockets
+		for _, t := range matches {
+			if or.OnTradeMatched != nil {
+				or.OnTradeMatched(t.Symbol, t.Price, t.Quantity, t.Timestamp)
+			}
 		}
 		// Clear pending jobs queue
 		_, _ = or.settlement.ProcessQueue(ctx)
@@ -120,6 +147,10 @@ func (or *OMSRouter) ProcessIncomingOrder(ctx context.Context, order *AdvancedOr
 				}
 			}
 		}
+	}
+
+	if or.OnOrderBookChanged != nil {
+		or.OnOrderBookChanged(order.Symbol)
 	}
 
 	return nil
@@ -157,6 +188,10 @@ func (or *OMSRouter) CancelOrder(orderID, ip, device string) error {
 		} else {
 			or.risk.ReleaseHold(order.UserID, "BTC", unfilledQty)
 		}
+	}
+
+	if or.OnOrderBookChanged != nil {
+		or.OnOrderBookChanged(order.Symbol)
 	}
 
 	return nil
@@ -210,6 +245,16 @@ func (or *OMSRouter) GetUserOrders(userID string) []*AdvancedOrder {
 // GetOrder retrieves a single tracked advanced order
 func (or *OMSRouter) GetOrder(orderID string) (*AdvancedOrder, error) {
 	return or.stateMachine.GetOrder(orderID)
+}
+
+// GetMatcher returns the active matcher
+func (or *OMSRouter) GetMatcher() *Matcher {
+	return or.matcher
+}
+
+// GetRecentTrades returns the trade executions
+func (or *OMSRouter) GetRecentTrades() []*Execution {
+	return or.execution.GetExecutions()
 }
 
 // SetDB dynamically configures database references for settlement and risk engines

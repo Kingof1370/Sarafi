@@ -219,11 +219,17 @@ func (m *Matcher) CancelOrder(orderID string) bool {
 	for i, ord := range m.StopOrders {
 		if ord.ID == orderID {
 			m.StopOrders = append(m.StopOrders[:i], m.StopOrders[i+1:]...)
+			m.SequenceNum++
 			return true
 		}
 	}
 
-	return removeFromLimits(&m.Bids) || removeFromLimits(&m.Asks)
+	if removeFromLimits(&m.Bids) || removeFromLimits(&m.Asks) {
+		m.SequenceNum++
+		return true
+	}
+
+	return false
 }
 
 // GetL2Depth exports the current bid/ask price depth snapshot
@@ -235,6 +241,7 @@ func (m *Matcher) GetL2Depth(maxLevels int) *types.OrderBookL2 {
 		Symbol:    m.Symbol,
 		Bids:      make([]types.OrderBookLevel, 0, maxLevels),
 		Asks:      make([]types.OrderBookLevel, 0, maxLevels),
+		Sequence:  m.SequenceNum,
 		Timestamp: time.Now(),
 	}
 
@@ -258,6 +265,7 @@ func (m *Matcher) GetL2Depth(maxLevels int) *types.OrderBookL2 {
 }
 
 func (m *Matcher) addOrderToBook(order *types.Order, limits *[]*MatchLimit, desc bool) {
+	m.SequenceNum++
 	price := order.Price
 	for i, limit := range *limits {
 		if limit.Price == price {
@@ -281,12 +289,21 @@ func (m *Matcher) triggerStopOrders(currentPrice float64) {
 	var remaining []*types.Order
 
 	for _, ord := range m.StopOrders {
-		// Stop condition: e.g. Buy stops triggers when price >= stop price, Sell stops when price <= stop price
 		isTriggered := false
-		if ord.Side == types.SideBuy && currentPrice >= ord.Price {
-			isTriggered = true
-		} else if ord.Side == types.SideSell && currentPrice <= ord.Price {
-			isTriggered = true
+		isTakeProfit := (ord.Type == "TAKE_PROFIT" || ord.Type == "TAKE_PROFIT_LIMIT")
+
+		if isTakeProfit {
+			if ord.Side == types.SideBuy && currentPrice <= ord.Price {
+				isTriggered = true
+			} else if ord.Side == types.SideSell && currentPrice >= ord.Price {
+				isTriggered = true
+			}
+		} else { // STOP / STOP_LIMIT / others
+			if ord.Side == types.SideBuy && currentPrice >= ord.Price {
+				isTriggered = true
+			} else if ord.Side == types.SideSell && currentPrice <= ord.Price {
+				isTriggered = true
+			}
 		}
 
 		if isTriggered {

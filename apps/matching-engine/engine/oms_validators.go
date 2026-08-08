@@ -97,5 +97,29 @@ func (v *OMSValidator) ValidateTradingRules(order *AdvancedOrder) error {
 		return fmt.Errorf("order quantity %f does not conform to step size %f", order.Quantity, cfg.StepSize)
 	}
 
+	// 5. Invalid combinations and safety validations
+	if order.Quantity <= 0 {
+		return fmt.Errorf("invalid order quantity %f: must be greater than 0", order.Quantity)
+	}
+
+	if order.Type == "LIMIT" && order.Price <= 0 {
+		return fmt.Errorf("invalid order price %f for LIMIT order", order.Price)
+	}
+
+	if order.PostOnly {
+		if order.Type == "MARKET" {
+			return fmt.Errorf("invalid combination: PostOnly cannot be used with MARKET orders")
+		}
+		if order.TimeInForce == TIF_IOC || order.TimeInForce == TIF_FOK {
+			return fmt.Errorf("invalid combination: PostOnly cannot be used with IOC or FOK")
+		}
+	}
+
+	if order.TimeInForce != "" {
+		if order.TimeInForce != TIF_GTC && order.TimeInForce != TIF_IOC && order.TimeInForce != TIF_FOK && order.TimeInForce != TIF_GTD && order.TimeInForce != TIF_GTT {
+			return fmt.Errorf("invalid time-in-force modifier: %s", order.TimeInForce)
+		}
+	}
+
 	return nil
 }
