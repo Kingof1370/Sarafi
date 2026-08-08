@@ -40,6 +40,56 @@ interface UserAPIKey {
   last_used_at?: string;
 }
 
+// P0009 Interface definitions
+interface KYCProfile {
+  user_id: string;
+  tier: string;
+  status: string;
+  provider_ref: string;
+  document_metadata: string;
+  rejection_reason: string;
+  attempts: number;
+  verified_at?: string;
+  expires_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface ComplianceAlert {
+  id: string;
+  user_id: string;
+  transaction_id: string;
+  rule_triggered: string;
+  risk_score: number;
+  evidence: string;
+  severity: string;
+  status: string;
+  reviewer: string;
+  resolution_reason: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface ComplianceCase {
+  id: string;
+  user_id: string;
+  status: string;
+  investigator_id: string;
+  resolution: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface RiskEvaluation {
+  id: string;
+  user_id: string;
+  score: number;
+  risk_level: string;
+  contributing_rules: string;
+  evaluation_version: string;
+  created_at: string;
+}
+
 export default function Home() {
   const { user, accessToken, setAuth, logout } = useAuthStore();
   const [email, setEmail] = useState('');
@@ -48,12 +98,11 @@ export default function Home() {
   const [error, setError] = useState('');
   const [isRegister, setIsRegister] = useState(false);
 
-  // App Tabs: trading vs security
-  const [activeTab, setActiveTab] = useState<'trading' | 'security'>('trading');
+  // App Tabs: trading vs security vs compliance
+  const [activeTab, setActiveTab] = useState<'trading' | 'security' | 'compliance'>('trading');
 
   // Theme & Layout state
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
-  const [layoutMode, setLayoutMode] = useState<'classic' | 'pro'>('pro');
 
   // Trading States
   const [symbol, setSymbol] = useState('BTC-USDT');
@@ -90,6 +139,33 @@ export default function Home() {
   const [mfaQrUrl, setMfaQrUrl] = useState('');
   const [mfaBackupCodes, setMfaBackupCodes] = useState<string[]>([]);
   const [mfaStatusMsg, setMfaStatusMsg] = useState('');
+
+  // P0009 Compliance States
+  const [kycProfile, setKycProfile] = useState<KYCProfile | null>(null);
+  const [userRestriction, setUserRestriction] = useState<string>('NORMAL');
+  const [riskEvaluation, setRiskEvaluation] = useState<RiskEvaluation | null>(null);
+  const [alerts, setAlerts] = useState<ComplianceAlert[]>([]);
+  const [cases, setCases] = useState<ComplianceCase[]>([]);
+
+  // KYC submit form states
+  const [kycTier, setKycTier] = useState<string>('STANDARD');
+  const [kycDocType, setKycDocType] = useState<string>('PASSPORT');
+  const [kycDocId, setKycDocId] = useState<string>('');
+  const [kycStatusMsg, setKycStatusMsg] = useState<string>('');
+
+  // Mock Deposit states
+  const [depAsset, setDepAsset] = useState<string>('USDT');
+  const [depAmount, setDepAmount] = useState<string>('2500');
+  const [depAddress, setDepAddress] = useState<string>('0x71C7656EC7ab88b098defB751B7401B5f6d1476B');
+  const [depTxHash, setDepTxHash] = useState<string>('0x123abc456def');
+  const [depStatusMsg, setDepStatusMsg] = useState<string>('');
+
+  // Case investigation action states
+  const [activeCaseId, setActiveCaseId] = useState<string>('');
+  const [caseNotes, setCaseNotes] = useState<any[]>([]);
+  const [caseResolution, setCaseResolution] = useState<string>('');
+  const [caseStatusValue, setCaseStatusValue] = useState<string>('RESOLVED');
+  const [investigatorNote, setInvestigatorNote] = useState<string>('');
 
   const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -149,6 +225,98 @@ export default function Home() {
       console.error('Failed to fetch security state', err);
     }
   }, [accessToken]);
+
+  // P0009 Fetch Compliance data
+  const fetchComplianceState = useCallback(async () => {
+    if (!accessToken) return;
+    try {
+      const kycRes = await api.get('/compliance/kyc/status');
+      setKycProfile(kycRes.data);
+
+      const restRes = await api.get('/compliance/restrictions');
+      setUserRestriction(restRes.data.restriction_type || 'NORMAL');
+
+      const riskRes = await api.get('/compliance/risk');
+      setRiskEvaluation(riskRes.data);
+
+      // Attempt to load administrative collections if authorized
+      try {
+        const alertsRes = await api.get('/compliance/alerts');
+        setAlerts(alertsRes.data.alerts || []);
+
+        const casesRes = await api.get('/compliance/cases');
+        setCases(casesRes.data.cases || []);
+      } catch (adminErr) {
+        // Suppress if the user doesn't hold standard compliance permissions
+      }
+    } catch (err) {
+      console.error('Failed to fetch compliance state', err);
+    }
+  }, [accessToken]);
+
+  const submitKYC = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setKycStatusMsg('');
+    try {
+      const docMeta = JSON.stringify({ document_type: kycDocType, document_id: kycDocId });
+      const res = await api.post('/compliance/kyc/submit', {
+        tier: kycTier,
+        doc_meta: docMeta,
+      });
+      setKycStatusMsg(`Success: KYC Submitted. Ref: ${res.data.profile?.provider_ref}`);
+      setKycDocId('');
+      fetchComplianceState();
+    } catch (err: any) {
+      setKycStatusMsg(`Error: ${err.response?.data?.error || err.message}`);
+    }
+  };
+
+  const submitMockDeposit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setDepStatusMsg('');
+    try {
+      const res = await api.post('/wallet/deposits/mock', {
+        asset: depAsset,
+        amount: parseFloat(depAmount),
+        address: depAddress,
+        tx_hash: depTxHash,
+      });
+      setDepStatusMsg(`Deposit Response: confirmations: ${res.data.confirmations}, status: ${res.data.compliance_status}. Details: ${res.data.details}`);
+      setDepTxHash('0x' + Math.random().toString(16).substring(2, 14));
+      fetchComplianceState();
+    } catch (err: any) {
+      setDepStatusMsg(`Compliance Error: ${err.response?.data?.error || err.message}`);
+    }
+  };
+
+  const viewCaseDetails = async (caseId: string) => {
+    try {
+      const res = await api.get(`/compliance/cases/${caseId}`);
+      setActiveCaseId(caseId);
+      setCaseNotes(res.data.notes || []);
+      setCaseResolution(res.data.case?.resolution || '');
+      setCaseStatusValue(res.data.case?.status || 'RESOLVED');
+    } catch (err: any) {
+      alert(`Error loading case: ${err.message}`);
+    }
+  };
+
+  const submitCaseResolution = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      await api.patch(`/compliance/cases/${activeCaseId}`, {
+        status: caseStatusValue,
+        resolution: caseResolution,
+        note: investigatorNote,
+      });
+      alert('Case updated successfully!');
+      setInvestigatorNote('');
+      setActiveCaseId('');
+      fetchComplianceState();
+    } catch (err: any) {
+      alert(`Error updating case: ${err.response?.data?.error || err.message}`);
+    }
+  };
 
   const revokeSession = async (id: string) => {
     try {
@@ -269,13 +437,15 @@ export default function Home() {
     if (accessToken) {
       fetchOrders();
       fetchSecurityState();
+      fetchComplianceState();
       const interval = setInterval(() => {
         fetchOrders();
         fetchSecurityState();
+        fetchComplianceState();
       }, 4000);
       return () => clearInterval(interval);
     }
-  }, [accessToken, fetchOrders, fetchSecurityState]);
+  }, [accessToken, fetchOrders, fetchSecurityState, fetchComplianceState]);
 
   const totalCost = parseFloat(price) * parseFloat(quantity);
   const estimatedFees = totalCost * (side === 'BUY' ? 0.002 : 0.001);
@@ -286,13 +456,12 @@ export default function Home() {
       <header className={`max-w-7xl mx-auto flex justify-between items-center pb-4 border-b ${theme === 'dark' ? 'border-slate-800' : 'border-slate-300'}`}>
         <div className="flex items-center gap-6">
           <h1 className="text-2xl font-extrabold tracking-wider bg-gradient-to-r from-cyan-400 to-blue-600 bg-clip-text text-transparent">
-            VELYXORA PRO
+            VELYXORA COMPLIANCE
           </h1>
           <div className="flex items-center gap-4 bg-slate-900/60 p-1.5 rounded-lg border border-slate-800 text-xs">
             <span className="text-slate-400 font-semibold">{symbol}</span>
             <span className="text-emerald-400 font-bold">${ticker.lastPrice.toFixed(2)}</span>
             <span className="text-slate-500">24h High: ${ticker.high.toFixed(2)}</span>
-            <span className="text-slate-500">24h Low: ${ticker.low.toFixed(2)}</span>
           </div>
         </div>
 
@@ -300,10 +469,22 @@ export default function Home() {
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-1.5 bg-slate-900/60 p-1 rounded-lg border border-slate-800 text-xs">
             <button
-              onClick={() => setActiveTab(activeTab === 'trading' ? 'security' : 'trading')}
+              onClick={() => setActiveTab('trading')}
+              className={`px-3 py-1 rounded font-bold transition ${activeTab === 'trading' ? 'bg-cyan-500 text-slate-950' : 'text-slate-300 hover:bg-slate-800'}`}
+            >
+              📈 Trading
+            </button>
+            <button
+              onClick={() => setActiveTab('security')}
               className={`px-3 py-1 rounded font-bold transition ${activeTab === 'security' ? 'bg-cyan-500 text-slate-950' : 'text-slate-300 hover:bg-slate-800'}`}
             >
-              {activeTab === 'trading' ? '🛡️ Security Center' : '📈 Back to Trading'}
+              🛡️ Security
+            </button>
+            <button
+              onClick={() => setActiveTab('compliance')}
+              className={`px-3 py-1 rounded font-bold transition ${activeTab === 'compliance' ? 'bg-cyan-500 text-slate-950' : 'text-slate-300 hover:bg-slate-800'}`}
+            >
+              💼 Compliance
             </button>
             <button onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} className="px-2 py-1 hover:bg-slate-800 rounded text-slate-300">
               {theme === 'dark' ? '☀️' : '🌙'}
@@ -464,11 +645,6 @@ export default function Home() {
                   <span className="text-right">0.25</span>
                   <span className="text-right">$12,525</span>
                 </div>
-                <div className="grid grid-cols-3 text-rose-400 bg-rose-950/20">
-                  <span>50050.00</span>
-                  <span className="text-right">1.50</span>
-                  <span className="text-right">$75,075</span>
-                </div>
                 <div className="flex justify-between py-2 border-y border-slate-800 my-2 text-xs font-bold">
                   <span className="text-slate-400">Spread</span>
                   <span className="text-slate-200">${ticker.spread.toFixed(2)} USDT (0.02%)</span>
@@ -477,11 +653,6 @@ export default function Home() {
                   <span>50000.00</span>
                   <span className="text-right">0.85</span>
                   <span className="text-right">$42,500</span>
-                </div>
-                <div className="grid grid-cols-3 text-emerald-400">
-                  <span>49950.00</span>
-                  <span className="text-right">2.10</span>
-                  <span className="text-right">$104,895</span>
                 </div>
               </div>
             </div>
@@ -498,11 +669,6 @@ export default function Home() {
                   <span>50000.00</span>
                   <span className="text-right">0.1250</span>
                   <span className="text-right text-slate-500">12:34:56</span>
-                </div>
-                <div className="grid grid-cols-3 text-rose-400">
-                  <span>49995.00</span>
-                  <span className="text-right">0.0500</span>
-                  <span className="text-right text-slate-500">12:34:49</span>
                 </div>
               </div>
             </div>
@@ -572,7 +738,6 @@ export default function Home() {
                         )}
                       </div>
                       <p className="text-[11px] text-slate-500 mt-1.5 truncate">UA: {sess.user_agent}</p>
-                      <p className="text-[10px] text-slate-600 mt-1">Started: {new Date(sess.created_at).toLocaleString()}</p>
                     </div>
                   ))
                 )}
@@ -581,7 +746,7 @@ export default function Home() {
 
             {/* MFA QR/Enrollment Settings */}
             <div className="border-t border-slate-800 mt-6 pt-4">
-              <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">P0003 MFA Setup Control</h4>
+              <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">MFA Setup Control</h4>
               <button
                 onClick={enrollMFA}
                 className="w-full py-2 bg-slate-950 border border-cyan-800 text-cyan-400 rounded-lg text-xs font-semibold hover:bg-cyan-950/20"
@@ -593,27 +758,9 @@ export default function Home() {
                 <div className="mt-3 p-3 bg-slate-950 border border-slate-800 rounded-lg text-xs space-y-2">
                   <p className="text-emerald-400 font-bold text-xs">{mfaStatusMsg}</p>
                   <div>
-                    <span className="text-slate-500 text-[10px] block">MFA Key Secret (Base32):</span>
+                    <span className="text-slate-500 text-[10px] block">MFA Key Secret:</span>
                     <code className="text-slate-300 font-bold block mt-0.5 bg-slate-900 p-1 rounded select-all text-center">{mfaSecret}</code>
                   </div>
-                  <div>
-                    <span className="text-slate-500 text-[10px] block">QR Code Enrollment URI:</span>
-                    <input
-                      readOnly
-                      value={mfaQrUrl}
-                      className="w-full bg-slate-900 border border-slate-800 rounded p-1 text-[10px] text-slate-400 focus:outline-none"
-                    />
-                  </div>
-                  {mfaBackupCodes.length > 0 && (
-                    <div>
-                      <span className="text-slate-500 text-[10px] block">MFA Backup Codes:</span>
-                      <div className="grid grid-cols-2 gap-1 mt-1 font-mono text-[10px]">
-                        {mfaBackupCodes.map((code) => (
-                          <span key={code} className="bg-slate-900 text-slate-300 border border-slate-800 text-center py-0.5 rounded">{code}</span>
-                        ))}
-                      </div>
-                    </div>
-                  )}
                 </div>
               )}
             </div>
@@ -636,65 +783,7 @@ export default function Home() {
               </div>
 
               <div>
-                <label className="block text-slate-400 mb-1 font-semibold">Permissions / Scopes</label>
-                <div className="space-y-2 mt-2 bg-slate-950 p-3 rounded-lg border border-slate-800/80">
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={keyPerms.walletRead}
-                      onChange={(e) => setKeyPermissions({ ...keyPerms, walletRead: e.target.checked })}
-                      className="rounded border-slate-800 bg-slate-900 text-cyan-500 focus:ring-cyan-500"
-                    />
-                    <span>wallet:read (Fetch balances & address)</span>
-                  </label>
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={keyPerms.walletWrite}
-                      onChange={(e) => setKeyPermissions({ ...keyPerms, walletWrite: e.target.checked })}
-                      className="rounded border-slate-800 bg-slate-900 text-cyan-500 focus:ring-cyan-500"
-                    />
-                    <span>wallet:write (Withdraw assets)</span>
-                  </label>
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={keyPerms.tradingWrite}
-                      onChange={(e) => setKeyPermissions({ ...keyPerms, tradingWrite: e.target.checked })}
-                      className="rounded border-slate-800 bg-slate-900 text-cyan-500 focus:ring-cyan-500"
-                    />
-                    <span>trading:write (Place & cancel orders)</span>
-                  </label>
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-slate-400 mb-1 font-semibold">IP Allowlist (Comma Separated Address / CIDR)</label>
-                <input
-                  type="text"
-                  value={keyIPAllowlist}
-                  onChange={(e) => setKeyIPAllowlist(e.target.value)}
-                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-100 text-xs focus:outline-none focus:border-cyan-500"
-                  placeholder="e.g., 12.34.56.78, 192.168.1.0/24"
-                />
-              </div>
-
-              <div>
-                <label className="block text-slate-400 mb-1 font-semibold">Expiration Duration</label>
-                <select
-                  value={keyExpiryDays}
-                  onChange={(e) => setKeyExpiryDays(Number(e.target.value))}
-                  className="w-full px-2 py-2 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-200"
-                >
-                  <option value={7}>7 Days</option>
-                  <option value={30}>30 Days</option>
-                  <option value={90}>90 Days</option>
-                  <option value={365}>365 Days</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-slate-400 mb-1 font-semibold">MFA Validation Code (P0003 hurdle)</label>
+                <label className="block text-slate-400 mb-1 font-semibold">MFA Validation Code</label>
                 <input
                   type="text"
                   value={keyMfaCode}
@@ -732,49 +821,300 @@ export default function Home() {
                           Revoke
                         </button>
                       </div>
-                      <div className="mt-2 space-y-1 text-slate-500 text-[10px]">
-                        <p className="font-mono">API Key: {key.api_key}</p>
-                        <p>Scopes: <span className="text-cyan-400">{key.permissions}</span></p>
-                        {key.ip_allowlist && <p className="truncate">IPs: {key.ip_allowlist}</p>}
-                        <p>Expires: {new Date(key.expires_at).toLocaleDateString()}</p>
-                        {key.last_used_at && <p>Last Used: {new Date(key.last_used_at).toLocaleString()}</p>}
-                      </div>
                     </div>
                   ))
                 )}
               </div>
             </div>
+          </section>
+        </div>
+      )}
 
-            {/* Created Credentials Modal Overlay */}
-            {createdKey && (
-              <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex justify-center items-center p-4 z-50">
-                <div className="bg-slate-900 border border-slate-800 rounded-xl max-w-lg w-full p-6 shadow-2xl relative">
-                  <h4 className="text-lg font-bold text-emerald-400 mb-2">🎉 API Key Generated</h4>
-                  <p className="text-xs text-slate-400 mb-4">
-                    Copy and store your API secret immediately! For security reasons, <span className="text-amber-400 font-bold">it will never be displayed again</span>.
-                  </p>
-
-                  <div className="space-y-3 font-mono text-xs text-left mb-6">
-                    <div className="bg-slate-950 p-2.5 rounded border border-slate-800">
-                      <span className="text-slate-500 text-[10px] block uppercase font-bold">API Key ID</span>
-                      <span className="text-slate-300 block select-all font-semibold break-all mt-1">{createdKey.apiKey}</span>
-                    </div>
-                    <div className="bg-slate-950 p-2.5 rounded border border-slate-800">
-                      <span className="text-slate-500 text-[10px] block uppercase font-bold text-rose-400">API Key Secret</span>
-                      <span className="text-slate-300 block select-all font-bold break-all mt-1">{createdKey.apiSecret}</span>
-                    </div>
+      {/* 3. Enterprise Compliance Tab (P0009 Dashboard) */}
+      {activeTab === 'compliance' && (
+        <div className="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6">
+          {/* Left Column: KYC Profile & Limits Restrictions */}
+          <div className="col-span-1 space-y-6">
+            <section className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-xl">
+              <h3 className="text-base font-bold text-cyan-400 mb-4">📂 KYC verification Profile</h3>
+              {kycProfile ? (
+                <div className="space-y-3 text-xs">
+                  <div className="flex justify-between py-1 border-b border-slate-800">
+                    <span className="text-slate-400">KYC Status:</span>
+                    <span className={`font-bold px-2 py-0.5 rounded text-[10px] ${
+                      kycProfile.status === 'VERIFIED' ? 'bg-emerald-950/60 text-emerald-400 border border-emerald-900' :
+                      kycProfile.status === 'REJECTED' ? 'bg-rose-950/60 text-rose-400 border border-rose-900' :
+                      'bg-amber-950/60 text-amber-400 border border-amber-900'
+                    }`}>{kycProfile.status}</span>
                   </div>
+                  <div className="flex justify-between py-1 border-b border-slate-800">
+                    <span className="text-slate-400">Active Tier:</span>
+                    <span className="text-cyan-400 font-bold">{kycProfile.tier}</span>
+                  </div>
+                  <div className="flex justify-between py-1 border-b border-slate-800">
+                    <span className="text-slate-400">Provider Reference:</span>
+                    <span className="font-mono text-slate-300">{kycProfile.provider_ref}</span>
+                  </div>
+                  <div className="flex justify-between py-1 border-b border-slate-800">
+                    <span className="text-slate-400">Submissions Attempts:</span>
+                    <span className="text-slate-300 font-bold">{kycProfile.attempts}</span>
+                  </div>
+                  {kycProfile.rejection_reason && (
+                    <div className="p-2.5 bg-rose-950/20 border border-rose-900 rounded-lg mt-2 text-rose-300 text-[11px]">
+                      <strong>Rejection Reason:</strong> {kycProfile.rejection_reason}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <p className="text-xs text-slate-500 text-center py-4">Loading verification data...</p>
+              )}
+            </section>
 
-                  <button
-                    onClick={() => setCreatedKey(null)}
-                    className="w-full py-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 rounded-lg text-xs font-bold"
+            <section className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-xl">
+              <h3 className="text-base font-bold text-cyan-400 mb-4">🛡️ Account restrictions Status</h3>
+              <div className="p-4 bg-slate-950 rounded-lg border border-slate-800 flex justify-between items-center text-xs">
+                <span className="text-slate-400">Active Restrictions:</span>
+                <span className={`font-bold px-3 py-1 rounded-full text-[10px] ${
+                  userRestriction === 'NORMAL' ? 'bg-emerald-950 text-emerald-400 border border-emerald-900' : 'bg-rose-950 text-rose-400 border border-rose-900'
+                }`}>{userRestriction}</span>
+              </div>
+            </section>
+
+            <section className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-xl">
+              <h3 className="text-base font-bold text-cyan-400 mb-4">🧮 KYC Documents submission Form</h3>
+              <form onSubmit={submitKYC} className="space-y-4 text-xs">
+                <div>
+                  <label className="block text-slate-400 mb-1 font-semibold">Tier Goal Selection</label>
+                  <select
+                    value={kycTier}
+                    onChange={(e) => setKycTier(e.target.value)}
+                    className="w-full px-2 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-200"
                   >
-                    I Have Safely Saved the Secret
-                  </button>
+                    <option value="STANDARD">STANDARD (10,000 USD Limits)</option>
+                    <option value="ADVANCED">ADVANCED (100,000 USD Limits)</option>
+                    <option value="INSTITUTIONAL">INSTITUTIONAL (1,000,000 USD Limits)</option>
+                  </select>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-slate-400 mb-1 font-semibold">ID Document Type</label>
+                    <select
+                      value={kycDocType}
+                      onChange={(e) => setKycDocType(e.target.value)}
+                      className="w-full px-2 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-200"
+                    >
+                      <option value="PASSPORT">Passport</option>
+                      <option value="DRIVERS_LICENSE">{"Driver's License"}</option>
+                      <option value="NATIONAL_ID">National ID Card</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 mb-1 font-semibold">Document Number</label>
+                    <input
+                      type="text"
+                      value={kycDocId}
+                      onChange={(e) => setKycDocId(e.target.value)}
+                      className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-100 text-xs focus:outline-none focus:border-cyan-500"
+                      placeholder="e.g. B987654"
+                      required
+                    />
+                  </div>
+                </div>
+                {kycStatusMsg && <p className="text-xs text-amber-400 font-semibold">{kycStatusMsg}</p>}
+                <button type="submit" className="w-full py-2 bg-cyan-500 text-slate-950 font-bold rounded-lg hover:bg-cyan-400 transition">
+                  Submit Mock Identity Files
+                </button>
+              </form>
+            </section>
+          </div>
+
+          {/* Center Column: Risk Metrics & Mock Deposits AML Screen */}
+          <div className="col-span-1 space-y-6">
+            <section className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-xl">
+              <h3 className="text-base font-bold text-cyan-400 mb-4">📊 Risk scoring Engine Sheet</h3>
+              {riskEvaluation ? (
+                <div className="space-y-3 text-xs">
+                  <div className="p-3 bg-slate-950 border border-slate-800 rounded-lg flex justify-between items-center">
+                    <div>
+                      <span className="text-[10px] text-slate-500 uppercase block font-semibold">Deterministic Score</span>
+                      <span className="text-xl font-bold text-slate-200 mt-1">{(riskEvaluation.score * 100).toFixed(1)} %</span>
+                    </div>
+                    <span className={`px-3 py-1 text-xs font-bold rounded ${
+                      riskEvaluation.risk_level === 'LOW' ? 'bg-emerald-950 text-emerald-400' :
+                      riskEvaluation.risk_level === 'MEDIUM' ? 'bg-amber-950 text-amber-400' :
+                      'bg-rose-950 text-rose-400'
+                    }`}>{riskEvaluation.risk_level} Risk Level</span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500 block text-[10px] font-semibold mb-1 uppercase">Contributing Factors Explanation</span>
+                    <pre className="p-2.5 bg-slate-950 rounded border border-slate-800 text-[10px] font-mono text-slate-400 overflow-x-auto whitespace-pre-wrap">
+                      {riskEvaluation.contributing_rules}
+                    </pre>
+                  </div>
+                </div>
+              ) : (
+                <p className="text-xs text-slate-500 text-center py-4">No risk scoring evaluation computed yet</p>
+              )}
+            </section>
+
+            <section className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-xl">
+              <h3 className="text-base font-bold text-cyan-400 mb-4">💰 Simulate Blockchain inbound Deposit</h3>
+              <p className="text-xs text-slate-500 mb-4">
+                Mock depositing funds to trigger real-time address watchlists checks and AML velocity rule alerts.
+              </p>
+              <form onSubmit={submitMockDeposit} className="space-y-4 text-xs">
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-slate-400 mb-1 font-semibold">Asset</label>
+                    <select
+                      value={depAsset}
+                      onChange={(e) => setDepAsset(e.target.value)}
+                      className="w-full px-2 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-200"
+                    >
+                      <option value="USDT">USDT</option>
+                      <option value="BTC">BTC</option>
+                      <option value="ETH">ETH</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 mb-1 font-semibold">Amount</label>
+                    <input
+                      type="number"
+                      value={depAmount}
+                      onChange={(e) => setDepAmount(e.target.value)}
+                      className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-100 text-xs focus:outline-none"
+                      required
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1 font-semibold">{"Sender Address (Try \"0xBLACKLISTED\" to test screening)"}</label>
+                  <input
+                    type="text"
+                    value={depAddress}
+                    onChange={(e) => setDepAddress(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-100 text-xs font-mono"
+                    required
+                  />
+                </div>
+                {depStatusMsg && <p className="p-2.5 bg-slate-950 border border-slate-800 rounded text-amber-400 font-mono text-[10px] break-all">{depStatusMsg}</p>}
+                <button type="submit" className="w-full py-2 bg-cyan-500 text-slate-950 font-bold rounded-lg hover:bg-cyan-400 transition">
+                  Inbound Simulated Transfer
+                </button>
+              </form>
+            </section>
+          </div>
+
+          {/* Right Column: Case Management & Alerts (Administrative Controls) */}
+          <div className="col-span-1 space-y-6">
+            <section className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-xl flex flex-col justify-between">
+              <div>
+                <h3 className="text-base font-bold text-cyan-400 mb-4">👮 Investigator Manual Case Management</h3>
+                <div className="space-y-3 overflow-y-auto max-h-[300px] pr-1">
+                  {cases.length === 0 ? (
+                    <p className="text-xs text-slate-500 text-center py-6">No compliance cases logged</p>
+                  ) : (
+                    cases.map((cs) => (
+                      <div
+                        key={cs.id}
+                        onClick={() => viewCaseDetails(cs.id)}
+                        className={`p-3 border rounded-lg text-xs cursor-pointer transition ${
+                          activeCaseId === cs.id ? 'bg-cyan-950/40 border-cyan-500' : 'bg-slate-950 border-slate-800'
+                        }`}
+                      >
+                        <div className="flex justify-between font-bold text-slate-300 mb-1">
+                          <span>Case ID: {cs.id}</span>
+                          <span className={`text-[9px] px-1.5 py-0.5 rounded ${
+                            cs.status === 'RESOLVED' ? 'bg-emerald-950 text-emerald-400' : 'bg-amber-950 text-amber-400'
+                          }`}>{cs.status}</span>
+                        </div>
+                        <p className="text-[11px] text-slate-500 truncate">User ID: {cs.user_id}</p>
+                      </div>
+                    ))
+                  )}
                 </div>
               </div>
-            )}
-          </section>
+
+              {activeCaseId && (
+                <div className="border-t border-slate-800 mt-6 pt-4 space-y-3 text-xs">
+                  <h4 className="font-bold text-slate-300">Resolve Case ID: {activeCaseId}</h4>
+
+                  {caseNotes.length > 0 && (
+                    <div className="space-y-1.5 max-h-24 overflow-y-auto bg-slate-950 p-2 rounded border border-slate-800 text-[10px]">
+                      {caseNotes.map((n, i) => (
+                        <div key={i} className="border-b border-slate-900/60 pb-1">
+                          <strong className="text-cyan-400">{n.author_id}: </strong>
+                          <span className="text-slate-400">{n.note}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  <form onSubmit={submitCaseResolution} className="space-y-3">
+                    <div>
+                      <label className="block text-slate-400 mb-1 font-semibold">Resolution Note</label>
+                      <textarea
+                        value={caseResolution}
+                        onChange={(e) => setCaseResolution(e.target.value)}
+                        className="w-full px-2 py-1.5 bg-slate-950 border border-slate-800 rounded text-slate-100"
+                        placeholder="Resolution files verified..."
+                        required
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="block text-slate-400 mb-1 font-semibold">Status Action</label>
+                        <select
+                          value={caseStatusValue}
+                          onChange={(e) => setCaseStatusValue(e.target.value)}
+                          className="w-full px-2 py-1.5 bg-slate-950 border border-slate-800 rounded text-slate-200"
+                        >
+                          <option value="RESOLVED">RESOLVE (Clear Alert)</option>
+                          <option value="DISMISSED">DISMISS (False Positive)</option>
+                          <option value="BLOCKED">BLOCK (Lock User)</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-slate-400 mb-1 font-semibold">New Investigation Note</label>
+                        <input
+                          type="text"
+                          value={investigatorNote}
+                          onChange={(e) => setInvestigatorNote(e.target.value)}
+                          className="w-full px-2 py-1.5 bg-slate-950 border border-slate-800 rounded text-slate-100"
+                          placeholder="Salary slips validated"
+                        />
+                      </div>
+                    </div>
+                    <button type="submit" className="w-full py-1.5 bg-emerald-500 text-slate-950 font-bold rounded hover:bg-emerald-400">
+                      Submit Resolution
+                    </button>
+                  </form>
+                </div>
+              )}
+            </section>
+
+            <section className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-xl">
+              <h3 className="text-base font-bold text-cyan-400 mb-4">🚨 AML Active Compliance Alerts ({alerts.length})</h3>
+              <div className="space-y-2.5 max-h-56 overflow-y-auto pr-1">
+                {alerts.length === 0 ? (
+                  <p className="text-xs text-slate-500 text-center py-4">No security alerts raised</p>
+                ) : (
+                  alerts.map((al) => (
+                    <div key={al.id} className="p-2.5 bg-slate-950 border border-slate-800 rounded text-[11px] space-y-1">
+                      <div className="flex justify-between font-bold text-slate-300">
+                        <span>Rule: {al.rule_triggered}</span>
+                        <span className={`text-[9px] px-1 rounded ${
+                          al.severity === 'CRITICAL' ? 'bg-rose-950 text-rose-400' : 'bg-amber-950 text-amber-400'
+                        }`}>{al.severity}</span>
+                      </div>
+                      <p className="text-slate-400">{al.evidence}</p>
+                      <p className="text-[10px] text-slate-600">User ID: {al.user_id} | Status: {al.status}</p>
+                    </div>
+                  ))
+                )}
+              </div>
+            </section>
+          </div>
         </div>
       )}
 
