@@ -503,6 +503,6 @@ func APIKeyRBACMiddleware(requiredScope string) gin.HandlerFunc {
 			return
 		}
 
-		c.AbortWithStatus(http.StatusOK)
+		c.Next()
 	}
 }

@@ -10,25 +10,37 @@ import (
 
 // OMSRouter coordinates validations, risk locks, matching execution, and cancellations
 type OMSRouter struct {
-	mu           sync.RWMutex
-	stateMachine *OMSStateMachine
-	validator    *OMSValidator
-	risk         *RiskEngine
-	matcher      *Matcher
-	execution    *ExecutionEngine
-	settlement   *SettlementEngine
+	mu             sync.RWMutex
+	stateMachine   *OMSStateMachine
+	validator      *OMSValidator
+	risk           *RiskEngine
+	matcher        *Matcher
+	execution      *ExecutionEngine
+	settlement     *SettlementEngine
+	marketServices *MarketServices
+	onTrade        func(symbol string, trade *types.Trade)
+	onDepth        func(symbol string, depth *types.OrderBookL2)
 }
 
 // NewOMSRouter initializes the routing supervisor
-func NewOMSRouter(sm *OMSStateMachine, val *OMSValidator, risk *RiskEngine, matcher *Matcher, exec *ExecutionEngine, settle *SettlementEngine) *OMSRouter {
+func NewOMSRouter(sm *OMSStateMachine, val *OMSValidator, risk *RiskEngine, matcher *Matcher, exec *ExecutionEngine, settle *SettlementEngine, ms *MarketServices) *OMSRouter {
 	return &OMSRouter{
-		stateMachine: sm,
-		validator:    val,
-		risk:         risk,
-		matcher:      matcher,
-		execution:    exec,
-		settlement:   settle,
+		stateMachine:   sm,
+		validator:      val,
+		risk:           risk,
+		matcher:        matcher,
+		execution:      exec,
+		settlement:     settle,
+		marketServices: ms,
 	}
+}
+
+// SetCallbacks configures WebSocket broadcast callback endpoints dynamically
+func (or *OMSRouter) SetCallbacks(onTrade func(string, *types.Trade), onDepth func(string, *types.OrderBookL2)) {
+	or.mu.Lock()
+	defer or.mu.Unlock()
+	or.onTrade = onTrade
+	or.onDepth = onDepth
 }
 
 // ProcessIncomingOrder processes orders through validation, risk hold, and matching pipelines
@@ -103,6 +115,16 @@ func (or *OMSRouter) ProcessIncomingOrder(ctx context.Context, order *AdvancedOr
 			_, _ = or.stateMachine.TransitionOrder(order.ID, StatusOMS_PartiallyFilled, "FILL", ip, device, "Partially filled")
 		}
 
+		// Record trade match, update candles and dispatch trade event (Rule 3 & 10)
+		for _, t := range matches {
+			if or.marketServices != nil {
+				or.marketServices.AddTrade(order.Symbol, t)
+			}
+			if or.onTrade != nil {
+				or.onTrade(order.Symbol, t)
+			}
+		}
+
 		// Also update any resting (maker) orders matched during this execution leg in the OMS
 		for _, t := range matches {
 			makerOrderID := t.SellOrderID
@@ -120,6 +142,12 @@ func (or *OMSRouter) ProcessIncomingOrder(ctx context.Context, order *AdvancedOr
 				}
 			}
 		}
+	}
+
+	// Broadcast updated order-book depth to WebSocket stream (Rule 4)
+	if or.onDepth != nil {
+		depth := or.matcher.GetL2Depth(20)
+		or.onDepth(order.Symbol, depth)
 	}
 
 	return nil
@@ -157,6 +185,12 @@ func (or *OMSRouter) CancelOrder(orderID, ip, device string) error {
 		} else {
 			or.risk.ReleaseHold(order.UserID, "BTC", unfilledQty)
 		}
+	}
+
+	// Broadcast updated order-book depth to WebSocket stream after cancellation (Rule 4)
+	if or.onDepth != nil {
+		depth := or.matcher.GetL2Depth(20)
+		or.onDepth(order.Symbol, depth)
 	}
 
 	return nil
@@ -239,4 +273,14 @@ func (or *OMSRouter) SuspendMarket(symbol string, suspended bool) {
 	or.mu.Lock()
 	defer or.mu.Unlock()
 	or.risk.SuspendMarket(symbol, suspended)
+}
+
+// GetReferencePrice returns the last index/reference price from the underlying risk engine
+func (or *OMSRouter) GetReferencePrice(symbol string) float64 {
+	return or.risk.GetReferencePrice(symbol)
+}
+
+// GetL2Depth retrieves order-book pricing levels from the underlying matcher
+func (or *OMSRouter) GetL2Depth(limit int) *types.OrderBookL2 {
+	return or.matcher.GetL2Depth(limit)
 }

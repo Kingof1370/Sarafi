@@ -32,8 +32,8 @@ func init() {
 	exec := engine.NewExecutionEngine(fees, risk)
 	settle := engine.NewSettlementEngine(nil)
 
-	globalOMSRouter = engine.NewOMSRouter(sm, val, risk, matcher, exec, settle)
 	globalMarketServices = engine.NewMarketServices()
+	globalOMSRouter = engine.NewOMSRouter(sm, val, risk, matcher, exec, settle, globalMarketServices)
 
 	// Parse MFA Trading Threshold from environment for professional configuration
 	if threshEnv := os.Getenv("MFA_TRADING_THRESHOLD"); threshEnv != "" {
@@ -67,6 +67,9 @@ func RegisterOMSHandlers(r *gin.RouterGroup) {
 		readGroup.Use(RBACMiddleware("wallet:read"))
 		{
 			readGroup.GET("/trades", handleGetMarketTrades)
+			readGroup.GET("/ticker", handleGetTicker)
+			readGroup.GET("/orderbook", handleGetOrderBook)
+			readGroup.GET("/candles", handleGetCandles)
 			readGroup.GET("/fees/schedule", handleGetFeeSchedule)
 			readGroup.GET("/fees/vip", handleGetUserVIP)
 			readGroup.GET("/system/health", handleGetSystemHealth)
@@ -334,11 +337,50 @@ func handleSuspendMarket(c *gin.Context) {
 }
 
 func handleGetMarketTrades(c *gin.Context) {
-	symbol := c.DefaultQuery("symbol", "BTC-USDT")
-	ticker := globalMarketServices.GetTicker(strings.ToUpper(symbol))
+	symbol := strings.ToUpper(c.DefaultQuery("symbol", "BTC-USDT"))
+	trades := globalMarketServices.GetRecentTrades(symbol)
 
 	c.JSON(http.StatusOK, gin.H{
+		"symbol": symbol,
+		"trades": trades,
+	})
+}
+
+func handleGetTicker(c *gin.Context) {
+	symbol := strings.ToUpper(c.DefaultQuery("symbol", "BTC-USDT"))
+	ticker := globalMarketServices.GetTicker(symbol)
+
+	c.JSON(http.StatusOK, gin.H{
+		"symbol": symbol,
 		"ticker": ticker,
+	})
+}
+
+func handleGetOrderBook(c *gin.Context) {
+	symbol := strings.ToUpper(c.DefaultQuery("symbol", "BTC-USDT"))
+	limitStr := c.DefaultQuery("limit", "100")
+	limit, _ := strconv.Atoi(limitStr)
+	if limit <= 0 {
+		limit = 100
+	}
+
+	depth := globalOMSRouter.GetL2Depth(limit)
+	c.JSON(http.StatusOK, gin.H{
+		"symbol":     symbol,
+		"order_book": depth,
+		"timestamp":  time.Now(),
+	})
+}
+
+func handleGetCandles(c *gin.Context) {
+	symbol := strings.ToUpper(c.DefaultQuery("symbol", "BTC-USDT"))
+	interval := c.DefaultQuery("interval", "1m")
+
+	candles := globalMarketServices.GetCandles(symbol, interval)
+	c.JSON(http.StatusOK, gin.H{
+		"symbol":   symbol,
+		"interval": interval,
+		"candles":  candles,
 	})
 }
 

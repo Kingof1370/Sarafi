@@ -109,8 +109,9 @@ func TestOMSRouterWorkflows(t *testing.T) {
 	fees := NewFeesEngine(0.0010, 0.0020)
 	exec := NewExecutionEngine(fees, risk)
 	settle := NewSettlementEngine(nil)
+	ms := NewMarketServices()
 
-	router := NewOMSRouter(sm, val, risk, matcher, exec, settle)
+	router := NewOMSRouter(sm, val, risk, matcher, exec, settle, ms)
 
 	// User deposits
 	risk.DepositAsset("buyer", "USDT", 30000.0)
@@ -206,8 +207,9 @@ func TestOMSStressConcurrency(t *testing.T) {
 	fees := NewFeesEngine(0.0010, 0.0020)
 	exec := NewExecutionEngine(fees, risk)
 	settle := NewSettlementEngine(nil)
+	ms := NewMarketServices()
 
-	router := NewOMSRouter(sm, val, risk, matcher, exec, settle)
+	router := NewOMSRouter(sm, val, risk, matcher, exec, settle, ms)
 
 	risk.DepositAsset("concurrent_user", "USDT", 1000000.0)
 

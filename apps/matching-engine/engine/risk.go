@@ -90,6 +90,13 @@ func (re *RiskEngine) SetReferencePrice(symbol string, price float64) {
 	re.marketReferencePrices[symbol] = price
 }
 
+// GetReferencePrice returns the last index/reference price
+func (re *RiskEngine) GetReferencePrice(symbol string) float64 {
+	re.mu.RLock()
+	defer re.mu.RUnlock()
+	return re.marketReferencePrices[symbol]
+}
+
 // DepositAsset sets or updates a user balance
 func (re *RiskEngine) DepositAsset(userID, asset string, amount float64) {
 	re.mu.Lock()

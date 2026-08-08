@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -105,6 +106,41 @@ func main() {
 	// 6.5 Setup WebSocket Gateway (P005 real-time core)
 	wsGateway := NewWSGateway(cfg.JWTSecret)
 	go wsGateway.Run()
+
+	// Connect authoritative Matching Engine events directly to WebSocket Gateway streams (P0007 Rule 3 & 5)
+	globalOMSRouter.SetCallbacks(
+		func(symbol string, trade *types.Trade) {
+			tradeData, err := json.Marshal(gin.H{
+				"event":   "trade",
+				"symbol":  symbol,
+				"trade":   trade,
+			})
+			if err == nil {
+				wsGateway.BroadcastToChannel("market:trades", tradeData)
+			}
+
+			// Also broadcast ticker updates whenever price changes
+			ticker := globalMarketServices.GetTicker(symbol)
+			tickerData, err := json.Marshal(gin.H{
+				"event":   "ticker",
+				"symbol":  symbol,
+				"ticker":  ticker,
+			})
+			if err == nil {
+				wsGateway.BroadcastToChannel("market:ticker", tickerData)
+			}
+		},
+		func(symbol string, depth *types.OrderBookL2) {
+			depthData, err := json.Marshal(gin.H{
+				"event":   "depth",
+				"symbol":  symbol,
+				"depth":   depth,
+			})
+			if err == nil {
+				wsGateway.BroadcastToChannel("market:orderbook", depthData)
+			}
+		},
+	)
 
 	// 7. Bootstrap Router
 	gin.SetMode(gin.ReleaseMode)

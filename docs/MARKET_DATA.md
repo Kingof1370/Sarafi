@@ -1,7 +1,7 @@
-# VELYXORA EXCHANGE - MARKET DATA STANDARDS
-This document outlines our Level 1, Level 2, and Level 3 market depth snappings.
+# VELYXORA EXCHANGE - MARKET DATA ARCHITECTURE (P0007)
+Details real-time and rest-based market data systems.
 
-## Market Depth Levels
-- **Level 1 (L1):** Best bid and best ask pricing feeds.
-- **Level 2 (L2):** Aggregated order volumes across a maximum of 50 price levels.
-- **Level 3 (L3):** Full raw order queues details for institutional low-latency FIX integrations.
+## Data Pipelines
+- All market data originates from the authoritative matching/order-book state.
+- Live updates are pushed to the WebSocket Gateway, and historical queries are processed via REST API endpoints.
+- No artificial, hardcoded, or fake values are used in production flows.

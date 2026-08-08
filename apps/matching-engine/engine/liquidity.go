@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"sync"
@@ -32,6 +33,13 @@ type SurveillanceAlert struct {
 	Timestamp time.Time `json:"timestamp"`
 }
 
+// ExternalLiquidityProvider defines the contract for pluggable external liquidity integrations (Rule 7)
+type ExternalLiquidityProvider interface {
+	Name() string
+	GetOrderBook(symbol string) (*types.OrderBookL2, error)
+	ExecuteOrder(ctx context.Context, order *types.Order) (*types.Trade, error)
+}
+
 // LiquidityEngine tracks real-time market quality and runs surveillance filters
 type LiquidityEngine struct {
 	mu           sync.RWMutex
@@ -40,6 +48,7 @@ type LiquidityEngine struct {
 	orderCounts  map[string]int                    // userID -> order count in window
 	cancelCounts map[string]int                    // userID -> cancellations in window
 	tradeHistory map[string][]*types.Trade         // symbol -> last trades
+	providers    map[string]ExternalLiquidityProvider // pluggable providers
 }
 
 // NewLiquidityEngine initializes the enterprise market surveillance core
@@ -50,7 +59,42 @@ func NewLiquidityEngine() *LiquidityEngine {
 		orderCounts:  make(map[string]int),
 		cancelCounts: make(map[string]int),
 		tradeHistory: make(map[string][]*types.Trade),
+		providers:    make(map[string]ExternalLiquidityProvider),
 	}
+}
+
+// RegisterProvider registers a modular external liquidity provider (Rule 7)
+func (le *LiquidityEngine) RegisterProvider(provider ExternalLiquidityProvider) {
+	le.mu.Lock()
+	defer le.mu.Unlock()
+	le.providers[provider.Name()] = provider
+}
+
+// GetProvider retrieves a registered external liquidity provider
+func (le *LiquidityEngine) GetProvider(name string) ExternalLiquidityProvider {
+	le.mu.RLock()
+	defer le.mu.RUnlock()
+	return le.providers[name]
+}
+
+// ValidateExternalExecution validates external liquidity match results strictly (Rule 8)
+func (le *LiquidityEngine) ValidateExternalExecution(trade *types.Trade, minPrice, maxPrice float64) error {
+	if trade == nil {
+		return fmt.Errorf("invalid external trade: payload is nil")
+	}
+	if trade.Price <= 0 || trade.Price < minPrice || trade.Price > maxPrice {
+		return fmt.Errorf("invalid external trade price: %f is out of bounds [%f, %f]", trade.Price, minPrice, maxPrice)
+	}
+	if trade.Quantity <= 0 {
+		return fmt.Errorf("invalid external trade quantity: %f must be greater than 0", trade.Quantity)
+	}
+	if trade.Symbol == "" {
+		return fmt.Errorf("invalid external trade: symbol is empty")
+	}
+	if trade.Timestamp.IsZero() || trade.Timestamp.After(time.Now().Add(5*time.Second)) {
+		return fmt.Errorf("invalid external trade timestamp: %v is future or missing", trade.Timestamp)
+	}
+	return nil
 }
 
 // AnalyzeDepth computes high-precision spread and depth metrics from the active matcher
