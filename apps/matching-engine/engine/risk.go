@@ -3,8 +3,10 @@ package engine
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
+	"velyxora/packages/common"
 	"velyxora/packages/database"
 	"velyxora/packages/types"
 )
@@ -62,25 +64,60 @@ func (re *RiskEngine) SetSTPMode(mode STPMode) {
 	re.stpMode = mode
 }
 
-// SetHaltStatus triggers global trading halts
+// SetHaltStatus triggers global trading halts and persists in DB
 func (re *RiskEngine) SetHaltStatus(halted bool) {
 	re.mu.Lock()
-	defer re.mu.Unlock()
 	re.tradingHalted = halted
+	re.mu.Unlock()
+
+	if re.db != nil {
+		ctx := context.Background()
+		val := "false"
+		if halted {
+			val = "true"
+		}
+		_, _ = re.db.Pool.Exec(ctx,
+			`INSERT INTO risk_controls (key, value, updated_at) VALUES ('halt', $1, NOW())
+			 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`, val)
+	}
 }
 
-// BlockAccount blocks a user from trading
+// BlockAccount blocks a user from trading and persists in DB
 func (re *RiskEngine) BlockAccount(userID string, blocked bool) {
 	re.mu.Lock()
-	defer re.mu.Unlock()
 	re.blockedAccounts[userID] = blocked
+	re.mu.Unlock()
+
+	if re.db != nil {
+		ctx := context.Background()
+		val := "false"
+		if blocked {
+			val = "true"
+		}
+		_, _ = re.db.Pool.Exec(ctx,
+			`INSERT INTO risk_controls (key, value, updated_at) VALUES ($1, $2, NOW())
+			 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+			"block_"+userID, val)
+	}
 }
 
-// SuspendMarket suspends trading for a specific symbol
+// SuspendMarket suspends trading for a specific symbol and persists in DB
 func (re *RiskEngine) SuspendMarket(symbol string, suspended bool) {
 	re.mu.Lock()
-	defer re.mu.Unlock()
 	re.suspendedMarkets[symbol] = suspended
+	re.mu.Unlock()
+
+	if re.db != nil {
+		ctx := context.Background()
+		val := "false"
+		if suspended {
+			val = "true"
+		}
+		_, _ = re.db.Pool.Exec(ctx,
+			`INSERT INTO risk_controls (key, value, updated_at) VALUES ($1, $2, NOW())
+			 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+			"suspend_"+symbol, val)
+	}
 }
 
 // SetReferencePrice registers price feeds for band protections
@@ -128,6 +165,31 @@ func (re *RiskEngine) ValidateOrder(order *types.Order, quoteAsset, baseAsset st
 	re.mu.Lock()
 	defer re.mu.Unlock()
 
+	// Double check state from database if connected to survive restarts/crashes
+	if re.db != nil {
+		ctx := context.Background()
+		var haltVal, blockVal, suspendVal string
+		_ = re.db.Pool.QueryRow(ctx, "SELECT value FROM risk_controls WHERE key = 'halt'").Scan(&haltVal)
+		_ = re.db.Pool.QueryRow(ctx, "SELECT value FROM risk_controls WHERE key = $1", "block_"+order.UserID).Scan(&blockVal)
+		_ = re.db.Pool.QueryRow(ctx, "SELECT value FROM risk_controls WHERE key = $1", "suspend_"+order.Symbol).Scan(&suspendVal)
+
+		if haltVal == "true" {
+			re.tradingHalted = true
+		} else if haltVal == "false" {
+			re.tradingHalted = false
+		}
+		if blockVal == "true" {
+			re.blockedAccounts[order.UserID] = true
+		} else if blockVal == "false" {
+			re.blockedAccounts[order.UserID] = false
+		}
+		if suspendVal == "true" {
+			re.suspendedMarkets[order.Symbol] = true
+		} else if suspendVal == "false" {
+			re.suspendedMarkets[order.Symbol] = false
+		}
+	}
+
 	// 1. Trading Halt check
 	if re.tradingHalted {
 		return fmt.Errorf("trading is currently halted globally")
@@ -158,10 +220,10 @@ func (re *RiskEngine) ValidateOrder(order *types.Order, quoteAsset, baseAsset st
 	}
 
 	// 4. Daily Volume Limit verification
-	orderValue := order.Quantity * order.Price
+	orderValue := common.SafeMul(order.Quantity, order.Price)
 	userVol := re.dailyVolume[order.UserID]
 	maxVol := re.dailyLimits[order.UserID]
-	if maxVol > 0 && (userVol+orderValue) > maxVol {
+	if maxVol > 0 && common.SafeAdd(userVol, orderValue) > maxVol {
 		return fmt.Errorf("daily trading volume limit exceeded: allowed max %f USD", maxVol)
 	}
 
@@ -169,7 +231,7 @@ func (re *RiskEngine) ValidateOrder(order *types.Order, quoteAsset, baseAsset st
 	if order.Type == types.TypeLimit && order.Price > 0 {
 		refPrice := re.marketReferencePrices[order.Symbol]
 		if refPrice > 0 {
-			deviation := (order.Price - refPrice) / refPrice
+			deviation := common.SafeDiv(common.SafeSub(order.Price, refPrice), refPrice)
 			if deviation > re.priceBandPercentage || deviation < -re.priceBandPercentage {
 				return fmt.Errorf("price band protection: order price %f deviates too much from reference %f", order.Price, refPrice)
 			}
@@ -180,7 +242,7 @@ func (re *RiskEngine) ValidateOrder(order *types.Order, quoteAsset, baseAsset st
 	var requiredAmount float64
 	var targetAsset string
 	if order.Side == types.SideBuy {
-		requiredAmount = order.Quantity * order.Price * (1.0 + feeRate)
+		requiredAmount = common.SafeMul(common.SafeMul(order.Quantity, order.Price), common.SafeAdd(1.0, feeRate))
 		targetAsset = quoteAsset
 	} else {
 		requiredAmount = order.Quantity
@@ -207,8 +269,8 @@ func (re *RiskEngine) ValidateOrder(order *types.Order, quoteAsset, baseAsset st
 			return fmt.Errorf("insufficient funds: required %f %s, available %f", requiredAmount, targetAsset, available)
 		}
 
-		newAvailable := available - requiredAmount
-		newReserved := reserved + requiredAmount
+		newAvailable := common.SafeSub(available, requiredAmount)
+		newReserved := common.SafeAdd(reserved, requiredAmount)
 
 		_, err = tx.Exec(ctx,
 			"UPDATE balances SET available = $1, reserved = $2, updated_at = NOW() WHERE user_id = $3 AND asset = $4",
@@ -244,15 +306,16 @@ func (re *RiskEngine) ValidateOrder(order *types.Order, quoteAsset, baseAsset st
 			holds = hlds[targetAsset]
 		}
 
-		if (available - holds) < requiredAmount {
-			return fmt.Errorf("insufficient funds: required %f %s, available %f", requiredAmount, targetAsset, available-holds)
+		availableBalance := common.SafeSub(available, holds)
+		if availableBalance < requiredAmount {
+			return fmt.Errorf("insufficient funds: required %f %s, available %f", requiredAmount, targetAsset, availableBalance)
 		}
 
 		// Apply Hold
 		if _, ok := re.activeHolds[order.UserID]; !ok {
 			re.activeHolds[order.UserID] = make(map[string]float64)
 		}
-		re.activeHolds[order.UserID][targetAsset] += requiredAmount
+		re.activeHolds[order.UserID][targetAsset] = common.SafeAdd(re.activeHolds[order.UserID][targetAsset], requiredAmount)
 	}
 
 	return nil
@@ -265,7 +328,7 @@ func (re *RiskEngine) ReleaseHold(userID, asset string, amount float64) {
 
 	// Update in-memory hold
 	if userHolds, ok := re.activeHolds[userID]; ok {
-		userHolds[asset] -= amount
+		userHolds[asset] = common.SafeSub(userHolds[asset], amount)
 		if userHolds[asset] < 0 {
 			userHolds[asset] = 0
 		}
@@ -289,8 +352,8 @@ func (re *RiskEngine) ReleaseHold(userID, asset string, amount float64) {
 			if releaseAmt > reserved {
 				releaseAmt = reserved
 			}
-			newAvailable := available + releaseAmt
-			newReserved := reserved - releaseAmt
+			newAvailable := common.SafeAdd(available, releaseAmt)
+			newReserved := common.SafeSub(reserved, releaseAmt)
 
 			_, _ = tx.Exec(ctx,
 				"UPDATE balances SET available = $1, reserved = $2, updated_at = NOW() WHERE user_id = $3 AND asset = $4",
@@ -339,9 +402,41 @@ func (re *RiskEngine) VerifySelfTrade(buyerID, sellerID string) (bool, STPMode) 
 	return false, STP_Allow
 }
 
+// LoadRiskControls loads persisted risk configurations from PostgreSQL
+func (re *RiskEngine) LoadRiskControls(ctx context.Context) {
+	if re.db == nil {
+		return
+	}
+
+	rows, err := re.db.Pool.Query(ctx, "SELECT key, value FROM risk_controls")
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	re.mu.Lock()
+	defer re.mu.Unlock()
+
+	for rows.Next() {
+		var key, value string
+		if err := rows.Scan(&key, &value); err == nil {
+			if key == "halt" {
+				re.tradingHalted = (value == "true")
+			} else if strings.HasPrefix(key, "block_") {
+				uID := strings.TrimPrefix(key, "block_")
+				re.blockedAccounts[uID] = (value == "true")
+			} else if strings.HasPrefix(key, "suspend_") {
+				sym := strings.TrimPrefix(key, "suspend_")
+				re.suspendedMarkets[sym] = (value == "true")
+			}
+		}
+	}
+}
+
 // SetDB dynamically configures or updates the database reference
 func (re *RiskEngine) SetDB(db *database.DB) {
 	re.mu.Lock()
-	defer re.mu.Unlock()
 	re.db = db
+	re.mu.Unlock()
+	re.LoadRiskControls(context.Background())
 }

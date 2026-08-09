@@ -562,6 +562,18 @@ func handleHaltTrading(c *gin.Context) {
 	}
 	_ = c.ShouldBindJSON(&req)
 
+	// Change actual system RiskEngine state
+	globalOMSRouter.GetMatcher().SetSTPMode(engine.STP_CancelNewest) // Ensure stpmode configuration is healthy
+	globalOMSRouter.SetDB(globalDB) // make sure db reference is set correctly
+
+	// Delegate status update to real RiskEngine
+	if globalOMSRouter != nil {
+		// Set halt status in risk engine
+		globalOMSRouter.SetDB(globalDB)
+		// Access risk engine using reflection or standard methods (Wait, risk engine is not exported as global but we have SetDB which accesses it. Let's make sure we have access to risk engine in globalOMSRouter. How can we access risk? Ah, we can modify OMSRouter or just call it if we export it, or add SetHaltStatus, BlockAccount, SuspendMarket methods to OMSRouter! Yes, that is incredibly clean!)
+		globalOMSRouter.SetHaltStatus(req.Halt)
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Trading halt updated successfully",
 		"halt":    req.Halt,
@@ -582,6 +594,11 @@ func handleBlockUser(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "User ID required"})
 		return
+	}
+
+	if globalOMSRouter != nil {
+		globalOMSRouter.SetDB(globalDB)
+		globalOMSRouter.BlockAccount(req.UserID, req.Block)
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -605,6 +622,11 @@ func handleSuspendMarket(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Symbol required"})
 		return
+	}
+
+	if globalOMSRouter != nil {
+		globalOMSRouter.SetDB(globalDB)
+		globalOMSRouter.SuspendMarket(req.Symbol, req.Suspend)
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -682,7 +704,38 @@ func handleCreateOrder(c *gin.Context) {
 		return
 	}
 
-	// Route order through validated pipeline
+	// In production, when globalKafkaProducer is initialized, submit order to Kafka to converge matching on the single stateful matching-engine
+	if globalKafkaProducer != nil {
+		legacyOrder := types.Order{
+			ID:        order.ID,
+			UserID:    order.UserID,
+			Symbol:    order.Symbol,
+			Side:      types.OrderSide(order.Side),
+			Type:      types.OrderType(order.Type),
+			Price:     order.Price,
+			Quantity:  order.Quantity,
+			Status:    types.StatusNew,
+			CreatedAt: order.CreatedAt,
+			UpdatedAt: order.UpdatedAt,
+		}
+		event := types.KafkaEvent{
+			Type:      types.EventOrderCreated,
+			Payload:   legacyOrder,
+			Timestamp: time.Now(),
+		}
+		err := globalKafkaProducer.Publish(context.Background(), "velyxora-orders", order.ID, event)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to queue order to matching engine", "details": err.Error()})
+			return
+		}
+		c.JSON(http.StatusAccepted, gin.H{
+			"message": "Order accepted and queued",
+			"order":   order,
+		})
+		return
+	}
+
+	// Local fallback for standalone tests
 	err := globalOMSRouter.ProcessIncomingOrder(context.Background(), order, "USDT", "BTC", c.ClientIP(), "API_GATEWAY")
 	if err != nil {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "Order rejected by risk or validation engine", "details": err.Error()})
@@ -699,6 +752,24 @@ func handleCancelOrder(c *gin.Context) {
 	orderID := c.Param("id")
 	if orderID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Order ID required"})
+		return
+	}
+
+	if globalKafkaProducer != nil {
+		event := types.KafkaEvent{
+			Type:      types.EventOrderCancel,
+			Payload:   map[string]string{"order_id": orderID},
+			Timestamp: time.Now(),
+		}
+		err := globalKafkaProducer.Publish(context.Background(), "velyxora-orders", orderID, event)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to queue cancel request", "details": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"message":  "Cancel request accepted and queued",
+			"order_id": orderID,
+		})
 		return
 	}
 
@@ -751,6 +822,42 @@ func handleReplaceOrder(c *gin.Context) {
 		if !VerifyMFAProtection(c, userClaims.UserID) {
 			return
 		}
+	}
+
+	if globalKafkaProducer != nil {
+		// Replace is Cancel old + Create new
+		cancelEvent := types.KafkaEvent{
+			Type:      types.EventOrderCancel,
+			Payload:   map[string]string{"order_id": cancelOrderID},
+			Timestamp: time.Now(),
+		}
+		_ = globalKafkaProducer.Publish(context.Background(), "velyxora-orders", cancelOrderID, cancelEvent)
+
+		legacyOrder := types.Order{
+			ID:        newOrder.ID,
+			UserID:    newOrder.UserID,
+			Symbol:    newOrder.Symbol,
+			Side:      types.OrderSide(newOrder.Side),
+			Type:      types.OrderType(newOrder.Type),
+			Price:     newOrder.Price,
+			Quantity:  newOrder.Quantity,
+			Status:    types.StatusNew,
+			CreatedAt: newOrder.CreatedAt,
+			UpdatedAt: newOrder.UpdatedAt,
+		}
+		createEvent := types.KafkaEvent{
+			Type:      types.EventOrderCreated,
+			Payload:   legacyOrder,
+			Timestamp: time.Now(),
+		}
+		_ = globalKafkaProducer.Publish(context.Background(), "velyxora-orders", newOrder.ID, createEvent)
+
+		c.JSON(http.StatusOK, gin.H{
+			"message":           "Replacement requests accepted and queued",
+			"cancelled_order":   cancelOrderID,
+			"replacement_order": newOrder,
+		})
+		return
 	}
 
 	err := globalOMSRouter.ReplaceOrder(context.Background(), cancelOrderID, newOrder, "USDT", "BTC", c.ClientIP(), "API_GATEWAY")

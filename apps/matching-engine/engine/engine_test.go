@@ -407,6 +407,90 @@ func TestSelfTradePreventionTriggers(t *testing.T) {
 	}
 }
 
+func TestMatcherSTPPolicies(t *testing.T) {
+	// 1. CANCEL_NEWEST
+	{
+		matcher := NewMatcher("BTC-USDT")
+		matcher.SetSTPMode(STP_CancelNewest)
+
+		sell := &types.Order{ID: "s1", UserID: "user_a", Symbol: "BTC-USDT", Side: types.SideSell, Type: types.TypeLimit, Price: 50000.0, Quantity: 1.0}
+		buy := &types.Order{ID: "b1", UserID: "user_a", Symbol: "BTC-USDT", Side: types.SideBuy, Type: types.TypeLimit, Price: 50000.0, Quantity: 1.0}
+
+		matcher.MatchOrder(sell)
+		trades := matcher.MatchOrder(buy)
+
+		if len(trades) != 0 {
+			t.Errorf("Expected no trades executed, got %d", len(trades))
+		}
+		if buy.Status != types.StatusCancelled {
+			t.Errorf("Expected buy order cancelled, got %s", buy.Status)
+		}
+		if sell.Status == types.StatusCancelled {
+			t.Errorf("Expected sell order to remain active")
+		}
+	}
+
+	// 2. CANCEL_OLDEST
+	{
+		matcher := NewMatcher("BTC-USDT")
+		matcher.SetSTPMode(STP_CancelOldest)
+
+		sell := &types.Order{ID: "s1", UserID: "user_a", Symbol: "BTC-USDT", Side: types.SideSell, Type: types.TypeLimit, Price: 50000.0, Quantity: 1.0}
+		buy := &types.Order{ID: "b1", UserID: "user_a", Symbol: "BTC-USDT", Side: types.SideBuy, Type: types.TypeLimit, Price: 50000.0, Quantity: 1.0}
+
+		matcher.MatchOrder(sell)
+		trades := matcher.MatchOrder(buy)
+
+		if len(trades) != 0 {
+			t.Errorf("Expected no trades executed, got %d", len(trades))
+		}
+		if sell.Status != types.StatusCancelled {
+			t.Errorf("Expected sell order cancelled, got %s", sell.Status)
+		}
+		if buy.Status == types.StatusCancelled {
+			t.Errorf("Expected buy order to remain active")
+		}
+	}
+
+	// 3. CANCEL_BOTH
+	{
+		matcher := NewMatcher("BTC-USDT")
+		matcher.SetSTPMode(STP_CancelBoth)
+
+		sell := &types.Order{ID: "s1", UserID: "user_a", Symbol: "BTC-USDT", Side: types.SideSell, Type: types.TypeLimit, Price: 50000.0, Quantity: 1.0}
+		buy := &types.Order{ID: "b1", UserID: "user_a", Symbol: "BTC-USDT", Side: types.SideBuy, Type: types.TypeLimit, Price: 50000.0, Quantity: 1.0}
+
+		matcher.MatchOrder(sell)
+		trades := matcher.MatchOrder(buy)
+
+		if len(trades) != 0 {
+			t.Errorf("Expected no trades executed, got %d", len(trades))
+		}
+		if sell.Status != types.StatusCancelled || buy.Status != types.StatusCancelled {
+			t.Errorf("Expected both orders cancelled, sell: %s, buy: %s", sell.Status, buy.Status)
+		}
+	}
+
+	// 4. ALLOW
+	{
+		matcher := NewMatcher("BTC-USDT")
+		matcher.SetSTPMode(STP_Allow)
+
+		sell := &types.Order{ID: "s1", UserID: "user_a", Symbol: "BTC-USDT", Side: types.SideSell, Type: types.TypeLimit, Price: 50000.0, Quantity: 1.0}
+		buy := &types.Order{ID: "b1", UserID: "user_a", Symbol: "BTC-USDT", Side: types.SideBuy, Type: types.TypeLimit, Price: 50000.0, Quantity: 1.0}
+
+		matcher.MatchOrder(sell)
+		trades := matcher.MatchOrder(buy)
+
+		if len(trades) != 1 {
+			t.Errorf("Expected 1 trade executed, got %d", len(trades))
+		}
+		if buy.Status != types.StatusFilled || sell.Status != types.StatusFilled {
+			t.Errorf("Expected both orders filled, sell: %s, buy: %s", sell.Status, buy.Status)
+		}
+	}
+}
+
 func TestAssetReservationsAndPnL(t *testing.T) {
 	pe := NewPositionEngine()
 	userID := "user_portfolio"

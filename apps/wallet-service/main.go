@@ -50,8 +50,8 @@ func (be *BalanceEngine) ProcessDoubleEntry(ctx context.Context, txID string, de
 				userID, ast).Scan(&bal.UserID, &bal.Asset, &bal.Available, &bal.Locked, &bal.Pending, &bal.Reserved, &bal.Total)
 
 			if err != nil {
-				// Row does not exist, initialize a new default balance row for the user
-				initialAvailable := 1000.0 // Default onboarding mock balance
+				// Row does not exist, initialize a new default balance row for the user starting strictly at zero
+				initialAvailable := 0.0
 				_, errInsert := tx.Exec(ctx,
 					"INSERT INTO balances (user_id, asset, available, locked, pending, reserved, total) VALUES ($1, $2, $3, $4, $5, $6, $7)",
 					userID, ast, initialAvailable, 0.0, 0.0, 0.0, initialAvailable)
@@ -139,13 +139,13 @@ func (be *BalanceEngine) ProcessDoubleEntry(ctx context.Context, txID string, de
 	// Fetch or initialize
 	debitBal, ok := be.balances[debitKey]
 	if !ok {
-		debitBal = &types.Balance{UserID: debitUser, Asset: asset, Available: 1000.0, Total: 1000.0}
+		debitBal = &types.Balance{UserID: debitUser, Asset: asset, Available: 0.0, Total: 0.0}
 		be.balances[debitKey] = debitBal
 	}
 
 	creditBal, ok := be.balances[creditKey]
 	if !ok {
-		creditBal = &types.Balance{UserID: creditUser, Asset: asset, Available: 1000.0, Total: 1000.0}
+		creditBal = &types.Balance{UserID: creditUser, Asset: asset, Available: 0.0, Total: 0.0}
 		be.balances[creditKey] = creditBal
 	}
 

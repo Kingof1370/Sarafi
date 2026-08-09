@@ -73,16 +73,29 @@ func main() {
 		DBName:   cfg.DBName,
 		SSLMode:  "disable",
 	})
+	appEnv := getEnv("APP_ENV", "production")
 	if err != nil {
+		if appEnv == "production" {
+			log.Error(fmt.Sprintf("FAIL CLOSED: PostgreSQL database connection failed in production: %v", err))
+			os.Exit(1)
+		}
 		log.Warn(fmt.Sprintf("Database connection failed (continuing bootstrap in fallback mode): %v", err))
 	} else {
 		globalDB = db
 		defer db.Close()
 		log.Info("PostgreSQL connection pool initialized successfully.")
+
+		// Connect the production OMS Router to PostgreSQL
+		globalOMSRouter.SetDB(db)
+
 		// Run database schema migrations
 		err = database.RunMigrations(context.Background(), db)
 		if err != nil {
 			log.Error(fmt.Sprintf("Database migrations failed: %v", err))
+			if appEnv == "production" {
+				log.Error("FAIL CLOSED: Database migrations failed in production!")
+				os.Exit(1)
+			}
 		}
 	}
 
@@ -93,8 +106,19 @@ func main() {
 		DB:       0,
 	})
 	if err != nil {
+		if appEnv == "production" {
+			log.Error(fmt.Sprintf("FAIL CLOSED: Redis cache connection failed in production: %v", err))
+			os.Exit(1)
+		}
 		log.Warn(fmt.Sprintf("Redis connection failed (continuing bootstrap in fallback mode): %v", err))
 	} else {
+		// Ping check in production
+		if appEnv == "production" {
+			if err := redisClient.Ping(context.Background()); err != nil {
+				log.Error(fmt.Sprintf("FAIL CLOSED: Redis ping failed in production: %v", err))
+				os.Exit(1)
+			}
+		}
 		globalRedis = redisClient
 		log.Info("Redis client connected successfully.")
 		// Trigger safe, idempotent Redis cache reconstruction from authoritative PostgreSQL database
@@ -112,6 +136,12 @@ func main() {
 	}
 
 	// 5. Setup Kafka Producer
+	if appEnv == "production" {
+		if err := probeKafkaHealth(context.Background(), cfg.KafkaBrokers); err != nil {
+			log.Error(fmt.Sprintf("FAIL CLOSED: Kafka broker health check failed in production: %v", err))
+			os.Exit(1)
+		}
+	}
 	kafkaProducer := common.NewKafkaProducer(cfg.KafkaBrokers)
 	globalKafkaProducer = kafkaProducer
 	defer kafkaProducer.Close()
@@ -737,22 +767,10 @@ func main() {
 				claims, _ := c.Get("claims")
 				userClaims := claims.(*security.Claims)
 
-				adapter, err := common.GetBlockchainAdapter(req.Asset)
+				// Generate/Derive cryptographically correct deposit address using our secure BIP-32 HD derivation helper
+				address, _, err := common.AllocateDepositAddress(c.Request.Context(), globalDB, userClaims.UserID, req.Asset)
 				if err != nil {
-					c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
-					return
-				}
-
-				// Assign mock standard validate address based on blockchain adapters
-				address := "0x71C7656EC7ab88b098defB751B7401B5f6d1476B"
-				if strings.ToUpper(req.Asset) == "BTC" {
-					address = "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2"
-				} else if strings.ToUpper(req.Asset) == "SOL" {
-					address = "Hxs86Xj38x8vMvVvE75A9XG9m9L9p9"
-				}
-
-				if !adapter.ValidateAddress(address) {
-					c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to formulate valid destination key address"})
+					c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to generate deposit address: %v", err)})
 					return
 				}
 
@@ -870,6 +888,18 @@ func main() {
 				}
 				_ = globalKafkaProducer.Publish(c.Request.Context(), "velyxora-withdrawals", withdrawal.ID, event)
 
+				// Trigger the robust 7-stage blockchain transaction state transitions asynchronously
+				go func() {
+					txCtx, txCancel := context.WithTimeout(context.Background(), 10*time.Minute)
+					defer txCancel()
+					txErr := common.ProcessBlockchainTransaction(txCtx, globalDB, withdrawal.ID, withdrawal.UserID, withdrawal.Asset, withdrawal.Amount, withdrawal.Address)
+					if txErr != nil {
+						log.Error("CRITICAL: Blockchain Transaction Processing Failure", "withdrawal_id", withdrawal.ID, "err", txErr)
+					} else {
+						log.Info("SUCCESS: Blockchain Transaction Completed and Confirmed on-chain", "withdrawal_id", withdrawal.ID)
+					}
+				}()
+
 				c.JSON(http.StatusAccepted, gin.H{
 					"message":    "Withdrawal request registered, pending risk audit",
 					"withdrawal": withdrawal,
@@ -878,6 +908,15 @@ func main() {
 
 			// Deposit Compliance Integration (P0008 + P0009)
 			wallet.POST("/deposits/mock", RBACMiddleware("wallet:write"), func(c *gin.Context) {
+				// Strict Production Isolation Check: reject mock deposits in production mode
+				appEnv := getEnv("APP_ENV", "production")
+				if appEnv == "production" {
+					c.JSON(http.StatusForbidden, gin.H{
+						"error": "FAIL CLOSED: Mock deposit endpoint is strictly disabled in production environments.",
+					})
+					return
+				}
+
 				var req struct {
 					Asset   string  `json:"asset" binding:"required"`
 					Amount  float64 `json:"amount" binding:"required,gt=0"`

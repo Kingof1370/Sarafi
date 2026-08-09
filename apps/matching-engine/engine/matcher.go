@@ -22,6 +22,7 @@ type Matcher struct {
 	StopOrders  []*types.Order // untriggered stop orders
 	LastPrice   float64
 	SequenceNum int64
+	STPMode     STPMode // Self-Trade Prevention configuration
 }
 
 // NewMatcher creates a book matching level
@@ -31,7 +32,15 @@ func NewMatcher(symbol string) *Matcher {
 		Bids:       make([]*MatchLimit, 0),
 		Asks:       make([]*MatchLimit, 0),
 		StopOrders: make([]*types.Order, 0),
+		STPMode:    STP_CancelNewest, // Default safe STP policy
 	}
+}
+
+// SetSTPMode configures the Matcher's STP Mode dynamically
+func (m *Matcher) SetSTPMode(mode STPMode) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.STPMode = mode
 }
 
 // MatchOrder matches incoming buy/sell orders and outputs executions (Price-Time Priority)
@@ -67,6 +76,25 @@ func (m *Matcher) MatchOrder(order *types.Order) []*types.Trade {
 
 			for len(limit.Orders) > 0 && order.Quantity > order.FilledQty {
 				sellOrder := limit.Orders[0]
+
+				// Enforce Self-Trade Prevention (STP)
+				if order.UserID == sellOrder.UserID {
+					if m.STPMode == STP_CancelNewest {
+						order.Status = types.StatusCancelled
+						return trades
+					} else if m.STPMode == STP_CancelOldest {
+						sellOrder.Status = types.StatusCancelled
+						limit.Orders = limit.Orders[1:] // pop & discard
+						continue
+					} else if m.STPMode == STP_CancelBoth {
+						sellOrder.Status = types.StatusCancelled
+						limit.Orders = limit.Orders[1:] // pop & discard
+						order.Status = types.StatusCancelled
+						return trades
+					}
+					// If STP_Allow, continue matching normally
+				}
+
 				matchQty := min(order.Quantity-order.FilledQty, sellOrder.Quantity-sellOrder.FilledQty)
 
 				order.FilledQty += matchQty
@@ -137,6 +165,25 @@ func (m *Matcher) MatchOrder(order *types.Order) []*types.Trade {
 
 			for len(limit.Orders) > 0 && order.Quantity > order.FilledQty {
 				buyOrder := limit.Orders[0]
+
+				// Enforce Self-Trade Prevention (STP)
+				if order.UserID == buyOrder.UserID {
+					if m.STPMode == STP_CancelNewest {
+						order.Status = types.StatusCancelled
+						return trades
+					} else if m.STPMode == STP_CancelOldest {
+						buyOrder.Status = types.StatusCancelled
+						limit.Orders = limit.Orders[1:] // pop & discard
+						continue
+					} else if m.STPMode == STP_CancelBoth {
+						buyOrder.Status = types.StatusCancelled
+						limit.Orders = limit.Orders[1:] // pop & discard
+						order.Status = types.StatusCancelled
+						return trades
+					}
+					// If STP_Allow, continue matching normally
+				}
+
 				matchQty := min(order.Quantity-order.FilledQty, buyOrder.Quantity-buyOrder.FilledQty)
 
 				order.FilledQty += matchQty
