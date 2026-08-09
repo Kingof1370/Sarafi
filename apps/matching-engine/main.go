@@ -6,61 +6,117 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/segmentio/kafka-go"
+
+	"velyxora/apps/matching-engine/engine"
 	"velyxora/packages/common"
+	"velyxora/packages/database"
 	"velyxora/packages/logger"
 	"velyxora/packages/types"
 )
 
-// Limit represents a specific price level in the order book
-type Limit struct {
-	Price  float64
-	Orders []*types.Order
-}
-
-// OrderBook matches bids and asks using standard Price-Time priority
-type OrderBook struct {
-	Symbol string
-	Bids   []*Limit // Buy orders sorted high to low
-	Asks   []*Limit // Sell orders sorted low to high
-}
-
-func NewOrderBook(symbol string) *OrderBook {
-	return &OrderBook{
-		Symbol: symbol,
-		Bids:   make([]*Limit, 0),
-		Asks:   make([]*Limit, 0),
-	}
-}
-
 func main() {
 	log := logger.NewLogger(logger.Config{
-		Level:       "INFO",
-		Format:      "JSON",
+		Level:       getEnv("LOG_LEVEL", "INFO"),
+		Format:      getEnv("LOG_FORMAT", "JSON"),
 		ServiceName: "matching-engine",
 	})
 
-	log.Info("Starting Velyxora Matching Engine...")
+	log.Info("Starting Velyxora Authoritative Matching Engine...")
 
+	appEnv := getEnv("APP_ENV", "production")
+
+	// 1. Initialize PostgreSQL Database Pool
+	var db *database.DB
+	var dbErr error
+	db, dbErr = database.NewConnectionPool(database.Config{
+		Host:     getEnv("DB_HOST", "localhost"),
+		Port:     5432,
+		User:     getEnv("DB_USER", "postgres"),
+		Password: getEnv("DB_PASSWORD", "postgres"),
+		DBName:   getEnv("DB_NAME", "velyxora"),
+		SSLMode:  "disable",
+	})
+
+	// Fail Closed in Production if DB is unavailable
+	if dbErr != nil {
+		if appEnv == "production" {
+			log.Error(fmt.Sprintf("FAIL CLOSED: PostgreSQL database pool is unavailable: %v", dbErr))
+			os.Exit(1)
+		}
+		log.Warn(fmt.Sprintf("Failed to initialize DB pool: %v", dbErr))
+	} else {
+		log.Info("PostgreSQL connection pool initialized successfully.")
+	}
+
+	// 2. Initialize Kafka Consumer and Producer
 	kafkaBrokers := strings.Split(getEnv("KAFKA_BROKERS", "localhost:9092"), ",")
+	if appEnv == "production" {
+		if len(kafkaBrokers) == 0 || kafkaBrokers[0] == "" {
+			log.Error("FAIL CLOSED: Kafka brokers are not configured!")
+			os.Exit(1)
+		}
+		if err := probeKafkaHealth(context.Background(), kafkaBrokers); err != nil {
+			log.Error(fmt.Sprintf("FAIL CLOSED: Kafka brokers unreachable: %v", err))
+			os.Exit(1)
+		}
+	}
+
 	consumer := common.NewKafkaConsumer(kafkaBrokers, "velyxora-orders", "matching-engine-group")
 	producer := common.NewKafkaProducer(kafkaBrokers)
 
 	defer consumer.Close()
 	defer producer.Close()
 
-	// Initializing local orderbooks for standard symbols
-	books := map[string]*OrderBook{
-		"BTC-USDT": NewOrderBook("BTC-USDT"),
-		"ETH-USDT": NewOrderBook("ETH-USDT"),
+	// 3. Initialize single authoritative OMSRouter & engine stack
+	sm := engine.NewOMSStateMachine()
+	val := engine.NewOMSValidator()
+	risk := engine.NewRiskEngine(10.0, 100000.0)
+	matcher := engine.NewMatcher("BTC-USDT")
+	fees := engine.NewFeesEngine(0.0010, 0.0020)
+	exec := engine.NewExecutionEngine(fees, risk)
+	settle := engine.NewSettlementEngine(db)
+
+	omsRouter := engine.NewOMSRouter(sm, val, risk, matcher, exec, settle)
+	if db != nil {
+		omsRouter.SetDB(db)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Synchronously publish trades/depth to Kafka
+	omsRouter.OnTradeMatched = func(symbol string, price, quantity float64, timestamp time.Time) {
+		tradePayload := map[string]interface{}{
+			"symbol":    symbol,
+			"price":     price,
+			"quantity":  quantity,
+			"timestamp": timestamp.UnixNano() / 1e6,
+		}
+		event := types.KafkaEvent{
+			Type:      types.EventOrderMatch,
+			Payload:   tradePayload,
+			Timestamp: timestamp,
+		}
+		_ = producer.Publish(ctx, "velyxora-trades", symbol, event)
+	}
+
+	omsRouter.OnOrderBookChanged = func(symbol string) {
+		m := omsRouter.GetMatcher()
+		if m != nil {
+			depth := m.GetL2Depth(20)
+			event := types.KafkaEvent{
+				Type:      types.EventBalanceUpdate, // reuse or use depth type
+				Payload:   depth,
+				Timestamp: depth.Timestamp,
+			}
+			_ = producer.Publish(ctx, "velyxora-depth", symbol, event)
+		}
+	}
 
 	// Handle Graceful Shutdown Signals
 	sigChan := make(chan os.Signal, 1)
@@ -71,7 +127,7 @@ func main() {
 		cancel()
 	}()
 
-	log.Info("Listening to order requests from Kafka...")
+	log.Info("Authoritative Matching Engine listening to velyxora-orders from Kafka...")
 
 	err := consumer.Consume(ctx, func(ctx context.Context, key string, value []byte) error {
 		var event types.KafkaEvent
@@ -87,43 +143,42 @@ func main() {
 				return err
 			}
 
-			var order types.Order
-			if err := json.Unmarshal(orderData, &order); err != nil {
+			var legacyOrder types.Order
+			if err := json.Unmarshal(orderData, &legacyOrder); err != nil {
 				return err
 			}
 
-			log.Info("Processing Order", "order_id", order.ID, "symbol", order.Symbol, "side", order.Side, "price", order.Price, "quantity", order.Quantity)
+			log.Info("Authoritative Matching Engine processing order", "order_id", legacyOrder.ID, "symbol", legacyOrder.Symbol, "side", legacyOrder.Side, "price", legacyOrder.Price, "quantity", legacyOrder.Quantity)
 
 			om := common.GetObservabilityManager()
-			om.OrdersSubmitted.WithLabelValues(order.Symbol, string(order.Side), string(order.Type)).Inc()
-			om.OrdersAccepted.WithLabelValues(order.Symbol, string(order.Side)).Inc()
+			om.OrdersSubmitted.WithLabelValues(legacyOrder.Symbol, string(legacyOrder.Side), string(legacyOrder.Type)).Inc()
+			om.OrdersAccepted.WithLabelValues(legacyOrder.Symbol, string(legacyOrder.Side)).Inc()
 
-			book, exists := books[order.Symbol]
-			if !exists {
-				book = NewOrderBook(order.Symbol)
-				books[order.Symbol] = book
+			// Convert to AdvancedOrder
+			order := &engine.AdvancedOrder{
+				ID:            legacyOrder.ID,
+				UserID:        legacyOrder.UserID,
+				Symbol:        legacyOrder.Symbol,
+				Side:          string(legacyOrder.Side),
+				Type:          string(legacyOrder.Type),
+				Price:         legacyOrder.Price,
+				Quantity:      legacyOrder.Quantity,
+				FilledQty:     legacyOrder.FilledQty,
+				Status:        engine.StatusOMS_Created,
+				TimeInForce:   engine.TimeInForce(legacyOrder.TimeInForce),
+				CreatedAt:     legacyOrder.CreatedAt,
+				UpdatedAt:     legacyOrder.UpdatedAt,
+			}
+			if order.TimeInForce == "" {
+				order.TimeInForce = engine.TIF_GTC
 			}
 
-			// Perform Limit Matching Logic (measure latency)
 			startMatching := time.Now()
-			matches := book.ProcessLimitOrder(&order)
+			err = omsRouter.ProcessIncomingOrder(ctx, order, "USDT", "BTC", "KAFKA_CONSUMER", "KAFKA")
 			om.MatchingLatencySeconds.WithLabelValues("matching", order.Symbol).Observe(time.Since(startMatching).Seconds())
 
-			for _, trade := range matches {
-				log.Info("Match Found!", "price", trade.Price, "quantity", trade.Quantity, "buyer", trade.BuyerID, "seller", trade.SellerID)
-
-				// Increment business SRE metrics
-				om.OrdersMatched.WithLabelValues(order.Symbol).Inc()
-				om.TradeCount.WithLabelValues(order.Symbol).Inc()
-				om.TradingVolume.WithLabelValues(order.Symbol).Add(trade.Quantity)
-
-				// Publish Trade Event
-				tradeEvent := types.KafkaEvent{
-					Type:      types.EventOrderMatch,
-					Payload:   trade,
-					Timestamp: time.Now(),
-				}
-				_ = producer.Publish(ctx, "velyxora-trades", trade.ID, tradeEvent)
+			if err != nil {
+				log.Error("Failed to process order in authoritative OMSRouter", "order_id", order.ID, "err", err)
 			}
 		}
 
@@ -135,146 +190,20 @@ func main() {
 	}
 }
 
-// ProcessLimitOrder processes an order and matches it with existing orders in the book
-func (ob *OrderBook) ProcessLimitOrder(order *types.Order) []*types.Trade {
-	var trades []*types.Trade
-
-	if order.Side == types.SideBuy {
-		// Try to match with Asks (Sell orders sorted lowest price first)
-		for i := 0; i < len(ob.Asks) && order.Quantity > order.FilledQty; {
-			limit := ob.Asks[i]
-			if limit.Price > order.Price && order.Type == types.TypeLimit {
-				break // Buy limit price is lower than sell ask price, no match
-			}
-
-			for len(limit.Orders) > 0 && order.Quantity > order.FilledQty {
-				sellOrder := limit.Orders[0]
-				matchQty := min(order.Quantity-order.FilledQty, sellOrder.Quantity-sellOrder.FilledQty)
-
-				order.FilledQty += matchQty
-				sellOrder.FilledQty += matchQty
-
-				if order.FilledQty == order.Quantity {
-					order.Status = types.StatusFilled
-				} else {
-					order.Status = types.StatusPartiallyFilled
-				}
-
-				if sellOrder.FilledQty == sellOrder.Quantity {
-					sellOrder.Status = types.StatusFilled
-					limit.Orders = limit.Orders[1:] // pop
-				} else {
-					sellOrder.Status = types.StatusPartiallyFilled
-				}
-
-				trade := &types.Trade{
-					ID:          "trd_" + strconv.FormatInt(time.Now().UnixNano(), 10),
-					Symbol:      ob.Symbol,
-					BuyerID:     order.UserID,
-					SellerID:    sellOrder.UserID,
-					BuyOrderID:  order.ID,
-					SellOrderID: sellOrder.ID,
-					Price:       limit.Price,
-					Quantity:    matchQty,
-					Timestamp:   time.Now(),
-				}
-				trades = append(trades, trade)
-			}
-
-			if len(limit.Orders) == 0 {
-				ob.Asks = append(ob.Asks[:i], ob.Asks[i+1:]...) // remove empty price level
-			} else {
-				i++
-			}
-		}
-
-		// If not fully filled, add to Bids order book
-		if order.FilledQty < order.Quantity {
-			ob.AddOrderToBook(order, &ob.Bids, true)
-		}
-
-	} else {
-		// Try to match with Bids (Buy orders sorted highest price first)
-		for i := 0; i < len(ob.Bids) && order.Quantity > order.FilledQty; {
-			limit := ob.Bids[i]
-			if limit.Price < order.Price && order.Type == types.TypeLimit {
-				break // Sell limit price is higher than buy bid price, no match
-			}
-
-			for len(limit.Orders) > 0 && order.Quantity > order.FilledQty {
-				buyOrder := limit.Orders[0]
-				matchQty := min(order.Quantity-order.FilledQty, buyOrder.Quantity-buyOrder.FilledQty)
-
-				order.FilledQty += matchQty
-				buyOrder.FilledQty += matchQty
-
-				if order.FilledQty == order.Quantity {
-					order.Status = types.StatusFilled
-				} else {
-					order.Status = types.StatusPartiallyFilled
-				}
-
-				if buyOrder.FilledQty == buyOrder.Quantity {
-					buyOrder.Status = types.StatusFilled
-					limit.Orders = limit.Orders[1:] // pop
-				} else {
-					buyOrder.Status = types.StatusPartiallyFilled
-				}
-
-				trade := &types.Trade{
-					ID:          "trd_" + strconv.FormatInt(time.Now().UnixNano(), 10),
-					Symbol:      ob.Symbol,
-					BuyerID:     buyOrder.UserID,
-					SellerID:    order.UserID,
-					BuyOrderID:  buyOrder.ID,
-					SellOrderID: order.ID,
-					Price:       limit.Price,
-					Quantity:    matchQty,
-					Timestamp:   time.Now(),
-				}
-				trades = append(trades, trade)
-			}
-
-			if len(limit.Orders) == 0 {
-				ob.Bids = append(ob.Bids[:i], ob.Bids[i+1:]...) // remove empty price level
-			} else {
-				i++
-			}
-		}
-
-		// If not fully filled, add to Asks order book
-		if order.FilledQty < order.Quantity {
-			ob.AddOrderToBook(order, &ob.Asks, false)
-		}
+func probeKafkaHealth(ctx context.Context, brokers []string) error {
+	if len(brokers) == 0 {
+		return fmt.Errorf("no kafka brokers configured")
 	}
-
-	return trades
-}
-
-func (ob *OrderBook) AddOrderToBook(order *types.Order, limits *[]*Limit, desc bool) {
-	// Simple linear insertion for price priority
-	price := order.Price
-	for i, limit := range *limits {
-		if limit.Price == price {
-			limit.Orders = append(limit.Orders, order)
-			return
-		}
-
-		if (desc && price > limit.Price) || (!desc && price < limit.Price) {
-			newLimit := &Limit{Price: price, Orders: []*types.Order{order}}
-			*limits = append((*limits)[:i], append([]*Limit{newLimit}, (*limits)[i:]...)...)
-			return
-		}
+	dialer := &kafka.Dialer{
+		Timeout:   1 * time.Second,
+		DualStack: true,
 	}
-
-	*limits = append(*limits, &Limit{Price: price, Orders: []*types.Order{order}})
-}
-
-func min(a, b float64) float64 {
-	if a < b {
-		return a
+	conn, err := dialer.DialContext(ctx, "tcp", brokers[0])
+	if err != nil {
+		return err
 	}
-	return b
+	conn.Close()
+	return nil
 }
 
 func getEnv(key, defaultVal string) string {

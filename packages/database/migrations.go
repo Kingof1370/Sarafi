@@ -849,6 +849,49 @@ var schemaMigrations = []Migration{
 			CREATE INDEX IF NOT EXISTS idx_account_restrictions_user_id ON account_restrictions(user_id);
 		`,
 	},
+	{
+		ID:   40,
+		Name: "create_blockchain_and_wallet_tables",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS wallet_addresses (
+				id VARCHAR(255) PRIMARY KEY,
+				user_id VARCHAR(255) NOT NULL,
+				asset VARCHAR(50) NOT NULL,
+				network VARCHAR(50) NOT NULL,
+				address VARCHAR(255) UNIQUE NOT NULL,
+				derivation_path VARCHAR(255) NOT NULL,
+				status VARCHAR(50) NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_wallet_addresses_user_asset ON wallet_addresses(user_id, asset);
+
+			CREATE TABLE IF NOT EXISTS blockchain_transactions (
+				id VARCHAR(255) PRIMARY KEY,
+				user_id VARCHAR(255) NOT NULL,
+				withdrawal_id VARCHAR(255) NOT NULL,
+				network VARCHAR(50) NOT NULL,
+				asset VARCHAR(50) NOT NULL,
+				amount DECIMAL(36, 18) NOT NULL,
+				address VARCHAR(255) NOT NULL,
+				status VARCHAR(50) NOT NULL,
+				tx_hash VARCHAR(255) DEFAULT '' NOT NULL,
+				block_number BIGINT DEFAULT 0 NOT NULL,
+				confirmation_count INT DEFAULT 0 NOT NULL,
+				error TEXT DEFAULT '' NOT NULL,
+				nonce INT DEFAULT 0 NOT NULL,
+				utxo_refs TEXT DEFAULT '' NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_blockchain_tx_withdrawal ON blockchain_transactions(withdrawal_id);
+
+			CREATE TABLE IF NOT EXISTS risk_controls (
+				key VARCHAR(255) PRIMARY KEY,
+				value VARCHAR(255) NOT NULL,
+				updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+		`,
+	},
 }
 
 // RunMigrations executes schema migration steps on the pgx connection pool

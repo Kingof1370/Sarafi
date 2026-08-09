@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 	"time"
+	"velyxora/packages/common"
 	"velyxora/packages/database"
 )
 
@@ -90,13 +91,14 @@ func (se *SettlementEngine) ProcessQueue(ctx context.Context) (int, int) {
 	failCount := 0
 
 	for _, job := range activeJobs {
-		// Strict Double Entry Accounting Validation: Total Debit MUST exactly match Total Credit + Fees
-		buyerDebit := job.Exec.Price*job.Exec.Quantity + job.Exec.BuyerFee
-		sellerCredit := job.Exec.Price*job.Exec.Quantity - job.Exec.SellerFee
-		feeIncome := job.Exec.BuyerFee + job.Exec.SellerFee
+		// Strict Double Entry Accounting Validation: Total Debit MUST exactly match Total Credit + Fees precisely
+		tradeValue := common.SafeMul(job.Exec.Price, job.Exec.Quantity)
+		buyerDebit := common.SafeAdd(tradeValue, job.Exec.BuyerFee)
+		sellerCredit := common.SafeSub(tradeValue, job.Exec.SellerFee)
+		feeIncome := common.SafeAdd(job.Exec.BuyerFee, job.Exec.SellerFee)
 
 		// Verification: Buyer debit == Seller proceeds + Platform fees income
-		if buyerDebit != (sellerCredit + feeIncome) {
+		if buyerDebit != common.SafeAdd(sellerCredit, feeIncome) {
 			job.Status = SettleFailed
 			job.ErrorMsg = "Double Entry Validation Failure: accounting equations desynchronized"
 			se.archiveJob(job)
@@ -149,7 +151,8 @@ func (se *SettlementEngine) executeSettlementTransaction(ctx context.Context, jo
 	defer tx.Rollback(ctx)
 
 	// 1. Debit Buyer Quote Asset: Price * Quantity + BuyerFee (from Reserved)
-	buyerDebit := exec.Price*exec.Quantity + exec.BuyerFee
+	tradeValue := common.SafeMul(exec.Price, exec.Quantity)
+	buyerDebit := common.SafeAdd(tradeValue, exec.BuyerFee)
 	_, err = tx.Exec(ctx,
 		"UPDATE balances SET reserved = reserved - $1, total = total - $1, updated_at = NOW() WHERE user_id = $2 AND asset = $3",
 		buyerDebit, exec.BuyerID, job.QuoteAsset)
@@ -175,7 +178,7 @@ func (se *SettlementEngine) executeSettlementTransaction(ctx context.Context, jo
 	}
 
 	// 4. Credit Seller Quote Asset: Price * Quantity - SellerFee
-	sellerCredit := exec.Price*exec.Quantity - exec.SellerFee
+	sellerCredit := common.SafeSub(tradeValue, exec.SellerFee)
 	_, err = tx.Exec(ctx,
 		"INSERT INTO balances (user_id, asset, available, total, updated_at) VALUES ($1, $2, $3, $3, NOW()) "+
 			"ON CONFLICT (user_id, asset) DO UPDATE SET available = balances.available + EXCLUDED.available, total = balances.total + EXCLUDED.total, updated_at = NOW()",
@@ -186,10 +189,11 @@ func (se *SettlementEngine) executeSettlementTransaction(ctx context.Context, jo
 
 	// 5. Credit Platform Fee Account
 	platformFeeAccount := "platform_fees"
+	platformFeeAmt := common.SafeAdd(exec.BuyerFee, exec.SellerFee)
 	_, err = tx.Exec(ctx,
 		"INSERT INTO balances (user_id, asset, available, total, updated_at) VALUES ($1, $2, $3, $3, NOW()) "+
 			"ON CONFLICT (user_id, asset) DO UPDATE SET available = balances.available + EXCLUDED.available, total = balances.total + EXCLUDED.total, updated_at = NOW()",
-		platformFeeAccount, job.QuoteAsset, exec.BuyerFee+exec.SellerFee)
+		platformFeeAccount, job.QuoteAsset, platformFeeAmt)
 	if err != nil {
 		return fmt.Errorf("failed to credit platform fee balance: %w", err)
 	}

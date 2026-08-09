@@ -22,12 +22,45 @@ type BackupRestoreEngine struct {
 	encryptionKey []byte // Loaded from env or config
 }
 
+// getPGCommand builds an executable command using configurable container name or native binary
+func getPGCommand(ctx context.Context, binary string, args []string) *exec.Cmd {
+	container := os.Getenv("DB_CONTAINER_NAME")
+	if container == "" {
+		// If running inside standard container/native, use binary directly
+		return exec.CommandContext(ctx, binary, args...)
+	}
+	// If running externally with Docker forwarding
+	dockerArgs := append([]string{"exec"}, container)
+	// If stdin piping is needed for psql
+	if binary == "psql" {
+		dockerArgs = append(dockerArgs, "-i")
+	}
+	dockerArgs = append(dockerArgs, binary)
+	dockerArgs = append(dockerArgs, args...)
+	return exec.CommandContext(ctx, "docker", dockerArgs...)
+}
+
 // NewBackupRestoreEngine initializes the secure backup and restore subsystem.
 func NewBackupRestoreEngine(db *database.DB, hexOrPlainKey string) (*BackupRestoreEngine, error) {
-	key := []byte(hexOrPlainKey)
-	if len(key) == 0 {
-		key = []byte("velyxora-backup-default-aes-key32") // fallback for tests
+	appEnv := os.Getenv("APP_ENV")
+	if appEnv == "" {
+		appEnv = "production"
 	}
+
+	key := []byte(hexOrPlainKey)
+	if appEnv == "production" {
+		if len(hexOrPlainKey) == 0 || hexOrPlainKey == "velyxora-backup-default-aes-key32" {
+			return nil, fmt.Errorf("FAIL CLOSED: BACKUP_ENCRYPTION_KEY is missing or insecure in production mode")
+		}
+		if len(key) < 32 {
+			return nil, fmt.Errorf("FAIL CLOSED: BACKUP_ENCRYPTION_KEY is too weak in production mode (must be at least 32 characters)")
+		}
+	} else {
+		if len(key) == 0 {
+			key = []byte("velyxora-backup-default-aes-key32")
+		}
+	}
+
 	if len(key) < 32 {
 		// Pad to 32 bytes for AES-256
 		padded := make([]byte, 32)
@@ -45,11 +78,16 @@ func NewBackupRestoreEngine(db *database.DB, hexOrPlainKey string) (*BackupResto
 
 // CreateEncryptedBackup runs pg_dump, encrypts the output with AES-256-GCM, and returns the encrypted bytes and/or file.
 func (bre *BackupRestoreEngine) CreateEncryptedBackup(ctx context.Context, host, user, password, dbName string, port int) ([]byte, string, error) {
-	// 1. Run pg_dump via exec
-	cmd := exec.CommandContext(ctx, "docker", "exec", "velyxora-db", "pg_dump", "-U", user, "-d", dbName, "--clean", "--no-owner")
-	if host != "postgres" && host != "" && host != "localhost" {
-		// If running in docker context or external, adjust parameters if needed
+	// 1. Run pg_dump via configurable command builder
+	args := []string{"-U", user, "-d", dbName, "--clean", "--no-owner"}
+	if host != "" && host != "localhost" && host != "127.0.0.1" {
+		args = append(args, "-h", host)
 	}
+	if port > 0 {
+		args = append(args, "-p", fmt.Sprintf("%d", port))
+	}
+
+	cmd := getPGCommand(ctx, "pg_dump", args)
 	cmd.Env = append(os.Environ(), fmt.Sprintf("PGPASSWORD=%s", password))
 
 	var stdoutBuf, stderrBuf bytes.Buffer
@@ -154,7 +192,7 @@ func (bre *BackupRestoreEngine) RunIsolatedRestoreTest(ctx context.Context, back
 	results["temp_db"] = restoreDBName
 
 	// Create dynamic isolated database
-	createCmd := exec.CommandContext(ctx, "docker", "exec", "velyxora-db", "createdb", "-U", user, restoreDBName)
+	createCmd := getPGCommand(ctx, "createdb", []string{"-U", user, restoreDBName})
 	createCmd.Env = append(os.Environ(), fmt.Sprintf("PGPASSWORD=%s", password))
 	if err := createCmd.Run(); err != nil {
 		return false, nil, fmt.Errorf("failed to create isolated restore DB %s: %v", restoreDBName, err)
@@ -162,13 +200,13 @@ func (bre *BackupRestoreEngine) RunIsolatedRestoreTest(ctx context.Context, back
 
 	// Guarantee cleanup of the temporary database
 	defer func() {
-		dropCmd := exec.CommandContext(ctx, "docker", "exec", "velyxora-db", "dropdb", "-U", user, "--if-exists", restoreDBName)
+		dropCmd := getPGCommand(ctx, "dropdb", []string{"-U", user, "--if-exists", restoreDBName})
 		dropCmd.Env = append(os.Environ(), fmt.Sprintf("PGPASSWORD=%s", password))
 		_ = dropCmd.Run()
 	}()
 
 	// 3. Restore plain backup dump into the isolated database using psql
-	restoreCmd := exec.CommandContext(ctx, "docker", "exec", "-i", "velyxora-db", "psql", "-U", user, "-d", restoreDBName)
+	restoreCmd := getPGCommand(ctx, "psql", []string{"-U", user, "-d", restoreDBName})
 	restoreCmd.Env = append(os.Environ(), fmt.Sprintf("PGPASSWORD=%s", password))
 	restoreCmd.Stdin = bytes.NewReader(plainData)
 

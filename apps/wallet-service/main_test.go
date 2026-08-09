@@ -3,11 +3,16 @@ package main
 import (
 	"context"
 	"testing"
+	"velyxora/packages/types"
 )
 
 func TestBalanceEngineDoubleEntryReconciliation(t *testing.T) {
 	be := NewBalanceEngine(nil)
 	ctx := context.Background()
+
+	// Explicitly credit the test balances first (simulating an authorized ledger deposit)
+	be.balances["usr_debit_USDT"] = &types.Balance{UserID: "usr_debit", Asset: "USDT", Available: 1000.0, Total: 1000.0}
+	be.balances["usr_credit_USDT"] = &types.Balance{UserID: "usr_credit", Asset: "USDT", Available: 1000.0, Total: 1000.0}
 
 	// Settle debit and credit safely
 	err := be.ProcessDoubleEntry(ctx, "tx_123", "usr_debit", "usr_credit", "USDT", 250.0, "Secure double entry ledger reconciliation")
