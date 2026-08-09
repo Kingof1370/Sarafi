@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	"velyxora/packages/common"
 	"velyxora/packages/security"
 )
 
@@ -64,12 +65,16 @@ func (g *WSGateway) Run() {
 		case client := <-g.register:
 			g.mu.Lock()
 			g.clients[client] = true
+			common.GetObservabilityManager().WSConnectionsActive.Inc()
+			common.GetObservabilityManager().WSConnectionsTotal.WithLabelValues("connect").Inc()
 			g.mu.Unlock()
 		case client := <-g.unregister:
 			g.mu.Lock()
 			if _, ok := g.clients[client]; ok {
 				delete(g.clients, client)
 				close(client.send)
+				common.GetObservabilityManager().WSConnectionsActive.Dec()
+				common.GetObservabilityManager().WSConnectionsTotal.WithLabelValues("disconnect").Inc()
 			}
 			g.mu.Unlock()
 		}

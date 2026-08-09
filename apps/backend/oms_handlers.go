@@ -107,7 +107,7 @@ func startMarketDataConsumers(brokers []string) {
 	// Consume trades asynchronously
 	go func() {
 		ctx := context.Background()
-		_ = tradesConsumer.Consume(ctx, func(key string, value []byte) error {
+		_ = tradesConsumer.Consume(ctx, func(ctx context.Context, key string, value []byte) error {
 			var event types.KafkaEvent
 			if err := json.Unmarshal(value, &event); err != nil {
 				return nil
@@ -146,7 +146,7 @@ func startMarketDataConsumers(brokers []string) {
 	// Consume depth asynchronously
 	go func() {
 		ctx := context.Background()
-		_ = depthConsumer.Consume(ctx, func(key string, value []byte) error {
+		_ = depthConsumer.Consume(ctx, func(ctx context.Context, key string, value []byte) error {
 			var event types.KafkaEvent
 			if err := json.Unmarshal(value, &event); err != nil {
 				return nil

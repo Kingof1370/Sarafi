@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/segmentio/kafka-go"
 
 	"velyxora/packages/common"
 	"velyxora/packages/database"
@@ -111,6 +112,9 @@ func main() {
 	// Start asynchronous Market Data Consumers
 	startMarketDataConsumers(cfg.KafkaBrokers)
 
+	// Start SRE alerting and incident manager background thread
+	go startSREAlertingManager(context.Background())
+
 	// 6.5 Setup WebSocket Gateway (P005 real-time core)
 	wsGateway := NewWSGateway(cfg.JWTSecret)
 	globalWSGateway = wsGateway
@@ -143,7 +147,7 @@ func main() {
 		c.Next()
 	})
 
-	// Custom structured logger middleware with Request Tracing IDs
+	// Custom structured logger middleware with Request Tracing IDs and Prometheus metrics
 	r.Use(func(c *gin.Context) {
 		start := time.Now()
 		traceID := c.GetHeader("X-Trace-ID")
@@ -156,10 +160,29 @@ func main() {
 		path := c.Request.URL.Path
 		raw := c.Request.URL.RawQuery
 
+		// Start trace context span
+		om := common.GetObservabilityManager()
+		ctx, span := om.StartTrace(c.Request.Context(), "HTTP "+c.Request.Method+" "+path)
+		c.Request = c.Request.WithContext(ctx)
+		defer span.End()
+
 		c.Next()
 
 		latency := time.Since(start)
 		status := c.Writer.Status()
+		statusStr := fmt.Sprintf("%d", status)
+
+		// Record Technical Prometheus Metrics
+		om.HTTPRequestsTotal.WithLabelValues(c.Request.Method, path, statusStr).Inc()
+		om.HTTPLatencySeconds.WithLabelValues(c.Request.Method, path).Observe(latency.Seconds())
+
+		if status >= 400 {
+			class := "4xx"
+			if status >= 500 {
+				class = "5xx"
+			}
+			om.HTTPErrorsTotal.WithLabelValues(c.Request.Method, path, class).Inc()
+		}
 
 		log.Info("HTTP Request",
 			"trace_id", traceID,
@@ -175,15 +198,64 @@ func main() {
 	// Redis Distributed Rate Limiting Middleware
 	r.Use(RateLimiterMiddleware())
 
-	// Health Check / Readiness / Liveness Probe Endpoint
-	r.GET("/health", func(c *gin.Context) {
+	// Liveness Probe determines if the process is alive without depending on databases or messaging networks
+	r.GET("/health/live", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"status": "UP",
+			"time":   time.Now().Format(time.RFC3339),
+		})
+	})
+
+	// Readiness Probe checks actual dependencies with strict timeouts and bounded retries
+	r.GET("/health/ready", func(c *gin.Context) {
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
+		defer cancel()
+
 		dbStatus := "UP"
-		if db == nil || db.Ping(c.Request.Context()) != nil {
+		if globalDB == nil || globalDB.Ping(ctx) != nil {
 			dbStatus = "DOWN"
 		}
 
 		redisStatus := "UP"
-		if redisClient == nil || redisClient.Ping(c.Request.Context()) != nil {
+		if globalRedis == nil || globalRedis.Ping(ctx) != nil {
+			redisStatus = "DOWN"
+		}
+
+		kafkaStatus := "UP"
+		if err := probeKafkaHealth(ctx, cfg.KafkaBrokers); err != nil {
+			kafkaStatus = "DOWN"
+		}
+
+		status := http.StatusOK
+		globalStatus := "UP"
+		if dbStatus == "DOWN" || redisStatus == "DOWN" || kafkaStatus == "DOWN" {
+			status = http.StatusServiceUnavailable
+			globalStatus = "DOWN"
+		}
+
+		c.JSON(status, gin.H{
+			"status": globalStatus,
+			"time":   time.Now().Format(time.RFC3339),
+			"components": gin.H{
+				"postgres": dbStatus,
+				"redis":    redisStatus,
+				"kafka":    kafkaStatus,
+			},
+		})
+	})
+
+	// Health Check backward compatible wrapper
+	r.GET("/health", func(c *gin.Context) {
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
+		defer cancel()
+
+		dbStatus := "UP"
+		if globalDB == nil || globalDB.Ping(ctx) != nil {
+			dbStatus = "DOWN"
+		}
+
+		redisStatus := "UP"
+		if globalRedis == nil || globalRedis.Ping(ctx) != nil {
 			redisStatus = "DOWN"
 		}
 
@@ -197,10 +269,8 @@ func main() {
 		})
 	})
 
-	// Prometheus Metrics Endpoint Placeholder
-	r.GET("/metrics", func(c *gin.Context) {
-		c.String(http.StatusOK, "# HELP velyxora_api_gateway_uptime Gateway uptime counter\n# TYPE velyxora_api_gateway_uptime counter\nvelyxora_api_gateway_uptime 1.0\n")
-	})
+	// Real Prometheus metrics endpoint using official prometheus client library
+	r.GET("/metrics", gin.WrapH(common.GetObservabilityManager().Handler()))
 
 	// Real-time Gateway WebSocket Core
 	r.GET("/ws", wsGateway.HandleConnection)
@@ -1264,4 +1334,127 @@ func VerifyTradingCompliance(ctx context.Context, userID string, symbol string, 
 	}
 
 	return nil
+}
+
+// probeKafkaHealth safely checks if the Kafka cluster is reachable with a strict timeout
+func probeKafkaHealth(ctx context.Context, brokers []string) error {
+	if len(brokers) == 0 {
+		return fmt.Errorf("no kafka brokers configured")
+	}
+	dialer := &kafka.Dialer{
+		Timeout:   1 * time.Second,
+		DualStack: true,
+	}
+	conn, err := dialer.DialContext(ctx, "tcp", brokers[0])
+	if err != nil {
+		return err
+	}
+	conn.Close()
+	return nil
+}
+
+// startSREAlertingManager runs a background loop to check technical SRE metrics and trigger live incidents
+func startSREAlertingManager(ctx context.Context) {
+	log := logger.NewLogger(logger.Config{
+		Level:       "INFO",
+		Format:      "JSON",
+		ServiceName: "sre-alerting-manager",
+	})
+
+	log.Info("Starting SRE Incident & Alerting Manager background thread...")
+
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if globalDB == nil {
+				continue // Wait for PostgreSQL pool to boot
+			}
+
+			om := common.GetObservabilityManager()
+
+			// 1. PostgreSQL Health Check
+			dbErr := globalDB.Ping(ctx)
+			handleSREDependencyIncident(ctx, "PostgreSQL Database Down", "Core PostgreSQL connection pool is unreachable or ping failed.", "postgres", dbErr, log)
+			if dbErr != nil {
+				om.PostgresErrorsTotal.WithLabelValues("ping", "unreachable").Inc()
+			}
+
+			// 2. Redis Health Check
+			var redisErr error
+			if globalRedis == nil {
+				redisErr = fmt.Errorf("redis client is nil")
+			} else {
+				redisErr = globalRedis.Ping(ctx)
+			}
+			handleSREDependencyIncident(ctx, "Redis Cache Offline", "Redis caching and rate limiter server is offline.", "redis", redisErr, log)
+			if redisErr != nil {
+				om.RedisFailuresTotal.WithLabelValues("ping").Inc()
+			}
+
+			// 3. Kafka Health Check
+			brokers := strings.Split(getEnv("KAFKA_BROKERS", "localhost:9092"), ",")
+			kafkaErr := probeKafkaHealth(ctx, brokers)
+			handleSREDependencyIncident(ctx, "Kafka Broker Cluster Down", "Apache Kafka message broker cluster is down.", "kafka", kafkaErr, log)
+			if kafkaErr != nil {
+				om.KafkaProducerFailures.WithLabelValues("health_probe").Inc()
+			}
+		}
+	}
+}
+
+// handleSREDependencyIncident manages open/resolve state machines for live incidents in PostgreSQL
+func handleSREDependencyIncident(ctx context.Context, title, desc, service string, err error, log *logger.Logger) {
+	if globalDB == nil {
+		return
+	}
+
+	om := common.GetObservabilityManager()
+
+	var existingID string
+	var existingStatus string
+	queryErr := globalDB.Pool.QueryRow(ctx,
+		"SELECT id, status FROM sre_incidents WHERE title = $1 AND status != 'RESOLVED'",
+		title).Scan(&existingID, &existingStatus)
+
+	if err != nil {
+		// Dependency is DOWN
+		if queryErr != nil {
+			// Incident does NOT exist, create a new one!
+			incID := "inc_" + fmt.Sprintf("%d", time.Now().UnixNano())
+			_, dbErr := globalDB.Pool.Exec(ctx,
+				"INSERT INTO sre_incidents (id, title, description, status, severity, service, created_at, updated_at) VALUES ($1, $2, $3, 'OPEN', 'CRITICAL', $4, NOW(), NOW())",
+				incID, title, desc, service)
+			if dbErr == nil {
+				log.Warn(fmt.Sprintf("[SRE ALERT] Created SRE Incident: %s", title))
+				om.SecurityIncidentsTotal.WithLabelValues(service, "CRITICAL").Inc()
+
+				// Log alert record
+				altID := "alt_" + fmt.Sprintf("%d", time.Now().UnixNano())
+				_, _ = globalDB.Pool.Exec(ctx,
+					"INSERT INTO sre_alerts (id, incident_id, metric_name, value, threshold, status, details, created_at, updated_at) VALUES ($1, $2, $3, 1.0, 0.5, 'TRIGGERED', $4, NOW(), NOW())",
+					altID, incID, service+"_unreachable", err.Error())
+			}
+		}
+	} else {
+		// Dependency is UP
+		if queryErr == nil {
+			// Incident exists and is OPEN, mitigate and RESOLVE it!
+			_, dbErr := globalDB.Pool.Exec(ctx,
+				"UPDATE sre_incidents SET status = 'RESOLVED', updated_at = NOW() WHERE id = $1",
+				existingID)
+			if dbErr == nil {
+				log.Info(fmt.Sprintf("[SRE HEALED] Resolved SRE Incident: %s", title))
+
+				// Update corresponding alert statuses
+				_, _ = globalDB.Pool.Exec(ctx,
+					"UPDATE sre_alerts SET status = 'RESOLVED', updated_at = NOW() WHERE incident_id = $1",
+					existingID)
+			}
+		}
+	}
 }

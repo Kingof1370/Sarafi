@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
+	"velyxora/packages/common"
 	"velyxora/packages/security"
 )
 
@@ -102,6 +103,7 @@ func RateLimiterMiddleware() gin.HandlerFunc {
 		}
 
 		if !RedisRateLimit(key, limit, window) {
+			common.GetObservabilityManager().RateLimitEventsTotal.WithLabelValues(path).Inc()
 			c.JSON(http.StatusTooManyRequests, gin.H{
 				"error":   "Too many requests. Please slow down.",
 				"limit":   limit,

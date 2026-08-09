@@ -238,7 +238,7 @@ func main() {
 
 	log.Info("Listening to trade results on Kafka to settle balances...")
 
-	err := consumer.Consume(ctx, func(key string, value []byte) error {
+	err := consumer.Consume(ctx, func(ctx context.Context, key string, value []byte) error {
 		var event types.KafkaEvent
 		if err := json.Unmarshal(value, &event); err != nil {
 			log.Error(fmt.Sprintf("Failed to parse Kafka event: %v", err))
@@ -262,17 +262,27 @@ func main() {
 			quoteAsset := strings.Split(trade.Symbol, "-")[1] // e.g. "USDT"
 			quoteAmount := trade.Price * trade.Quantity
 
+			om := common.GetObservabilityManager()
+			om.WalletOpsTotal.WithLabelValues("settlement", baseAsset).Inc()
+			om.WalletOpsTotal.WithLabelValues("settlement", quoteAsset).Inc()
+
 			// Settle Buyer Debit (USDT) -> Credit Seller (USDT)
 			txID := "tx_ld_" + fmt.Sprintf("%d", time.Now().UnixNano())
+			startQuote := time.Now()
 			err = be.ProcessDoubleEntry(ctx, txID, trade.BuyerID, trade.SellerID, quoteAsset, quoteAmount, fmt.Sprintf("Settled trade purchase: %s", trade.ID))
+			om.PostgresLatencySeconds.WithLabelValues("tx").Observe(time.Since(startQuote).Seconds())
 			if err != nil {
+				om.PostgresErrorsTotal.WithLabelValues("tx", "settle_quote_error").Inc()
 				log.Error("Failed to settle Quote ledger transfer", "err", err)
 				return nil
 			}
 
 			// Settle Seller Debit (BTC) -> Credit Buyer (BTC)
+			startBase := time.Now()
 			err = be.ProcessDoubleEntry(ctx, txID, trade.SellerID, trade.BuyerID, baseAsset, trade.Quantity, fmt.Sprintf("Settled trade delivery: %s", trade.ID))
+			om.PostgresLatencySeconds.WithLabelValues("tx").Observe(time.Since(startBase).Seconds())
 			if err != nil {
+				om.PostgresErrorsTotal.WithLabelValues("tx", "settle_base_error").Inc()
 				log.Error("Failed to settle Base ledger transfer", "err", err)
 				return nil
 			}
