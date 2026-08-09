@@ -73,7 +73,7 @@ func main() {
 
 	log.Info("Listening to order requests from Kafka...")
 
-	err := consumer.Consume(ctx, func(key string, value []byte) error {
+	err := consumer.Consume(ctx, func(ctx context.Context, key string, value []byte) error {
 		var event types.KafkaEvent
 		if err := json.Unmarshal(value, &event); err != nil {
 			log.Error(fmt.Sprintf("Failed to parse Kafka event: %v", err))
@@ -94,16 +94,28 @@ func main() {
 
 			log.Info("Processing Order", "order_id", order.ID, "symbol", order.Symbol, "side", order.Side, "price", order.Price, "quantity", order.Quantity)
 
+			om := common.GetObservabilityManager()
+			om.OrdersSubmitted.WithLabelValues(order.Symbol, string(order.Side), string(order.Type)).Inc()
+			om.OrdersAccepted.WithLabelValues(order.Symbol, string(order.Side)).Inc()
+
 			book, exists := books[order.Symbol]
 			if !exists {
 				book = NewOrderBook(order.Symbol)
 				books[order.Symbol] = book
 			}
 
-			// Perform Limit Matching Logic
+			// Perform Limit Matching Logic (measure latency)
+			startMatching := time.Now()
 			matches := book.ProcessLimitOrder(&order)
+			om.MatchingLatencySeconds.WithLabelValues("matching", order.Symbol).Observe(time.Since(startMatching).Seconds())
+
 			for _, trade := range matches {
 				log.Info("Match Found!", "price", trade.Price, "quantity", trade.Quantity, "buyer", trade.BuyerID, "seller", trade.SellerID)
+
+				// Increment business SRE metrics
+				om.OrdersMatched.WithLabelValues(order.Symbol).Inc()
+				om.TradeCount.WithLabelValues(order.Symbol).Inc()
+				om.TradingVolume.WithLabelValues(order.Symbol).Add(trade.Quantity)
 
 				// Publish Trade Event
 				tradeEvent := types.KafkaEvent{

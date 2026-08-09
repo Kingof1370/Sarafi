@@ -803,6 +803,37 @@ var schemaMigrations = []Migration{
 			ON CONFLICT (id) DO NOTHING;
 		`,
 	},
+	{
+		ID:   38,
+		Name: "create_sre_incidents_and_alerts_tables",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS sre_incidents (
+				id VARCHAR(255) PRIMARY KEY,
+				title VARCHAR(255) NOT NULL,
+				description TEXT NOT NULL,
+				status VARCHAR(50) NOT NULL,
+				severity VARCHAR(50) NOT NULL,
+				service VARCHAR(255) NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+
+			CREATE TABLE IF NOT EXISTS sre_alerts (
+				id VARCHAR(255) PRIMARY KEY,
+				incident_id VARCHAR(255) REFERENCES sre_incidents(id) ON DELETE SET NULL,
+				metric_name VARCHAR(255) NOT NULL,
+				value DECIMAL(36, 18) NOT NULL,
+				threshold DECIMAL(36, 18) NOT NULL,
+				status VARCHAR(50) NOT NULL,
+				details TEXT NOT NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+
+			CREATE INDEX IF NOT EXISTS idx_sre_incidents_status ON sre_incidents(status);
+			CREATE INDEX IF NOT EXISTS idx_sre_alerts_metric ON sre_alerts(metric_name);
+		`,
+	},
 }
 
 // RunMigrations executes schema migration steps on the pgx connection pool
