@@ -268,6 +268,8 @@ func RegisterOMSHandlers(r *gin.RouterGroup) {
 		adminGroup.Use(RBACMiddleware("system:admin"))
 		{
 			adminGroup.POST("/system/backup", handleTriggerBackup)
+			adminGroup.GET("/system/backups", handleGetBackupsHistory)
+			adminGroup.GET("/system/recovery", handleGetRecoveryHistory)
 		}
 
 		// Super admin operations (super:admin)
@@ -287,6 +289,72 @@ func handleGetSystemHealth(c *gin.Context) {
 		"goroutines":    12,
 		"disk_free_gb":  85.5,
 	})
+}
+
+
+func handleGetBackupsHistory(c *gin.Context) {
+	if globalDB == nil {
+		c.JSON(http.StatusOK, gin.H{"backups": []interface{}{}})
+		return
+	}
+
+	rows, err := globalDB.Pool.Query(c.Request.Context(),
+		"SELECT id, backup_type, status, filepath, timestamp FROM backup_history ORDER BY timestamp DESC LIMIT 20")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	type BackupRow struct {
+		ID        string    `json:"id"`
+		Type      string    `json:"backup_type"`
+		Status    string    `json:"status"`
+		Filepath  string    `json:"filepath"`
+		Timestamp time.Time `json:"timestamp"`
+	}
+
+	backups := make([]BackupRow, 0)
+	for rows.Next() {
+		var b BackupRow
+		if errScan := rows.Scan(&b.ID, &b.Type, &b.Status, &b.Filepath, &b.Timestamp); errScan == nil {
+			backups = append(backups, b)
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"backups": backups})
+}
+
+func handleGetRecoveryHistory(c *gin.Context) {
+	if globalDB == nil {
+		c.JSON(http.StatusOK, gin.H{"recovery_runs": []interface{}{}})
+		return
+	}
+
+	rows, err := globalDB.Pool.Query(c.Request.Context(),
+		"SELECT id, status, details, timestamp FROM recovery_history ORDER BY timestamp DESC LIMIT 20")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	type RecoveryRow struct {
+		ID        string    `json:"id"`
+		Status    string    `json:"status"`
+		Details   string    `json:"details"`
+		Timestamp time.Time `json:"timestamp"`
+	}
+
+	runs := make([]RecoveryRow, 0)
+	for rows.Next() {
+		var r RecoveryRow
+		if errScan := rows.Scan(&r.ID, &r.Status, &r.Details, &r.Timestamp); errScan == nil {
+			runs = append(runs, r)
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"recovery_runs": runs})
 }
 
 func handleTriggerBackup(c *gin.Context) {
@@ -317,11 +385,29 @@ func handleTriggerBackup(c *gin.Context) {
 		}
 	}
 
+	// Dynamic Production-grade Backup triggering directly through our new BackupRestoreEngine
+	bre, err := security.NewBackupRestoreEngine(globalDB, os.Getenv("BACKUP_ENCRYPTION_KEY"))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to initialize backup engine: %v", err)})
+		return
+	}
+
+	dbHost := getEnv("DB_HOST", "postgres")
+	dbUser := getEnv("DB_USER", "velyxora")
+	dbPass := getEnv("DB_PASSWORD", "super-secure-db-password-123")
+	dbName := getEnv("DB_NAME", "velyxora")
+
+	_, filepath, err := bre.CreateEncryptedBackup(c.Request.Context(), dbHost, dbUser, dbPass, dbName, 5432)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to generate secure backup: %v", err)})
+		return
+	}
+
 	c.JSON(http.StatusAccepted, gin.H{
 		"message":   "System backup successfully generated",
-		"id":        "bk_db_123456",
+		"id":        "bk_db_" + strconv.FormatInt(time.Now().UnixNano(), 10),
 		"status":    "COMPLETED",
-		"filepath":  "/tmp/velyxora_backup_bk_db_123456.json",
+		"filepath":  filepath,
 		"timestamp": time.Now(),
 	})
 }
@@ -329,6 +415,7 @@ func handleTriggerBackup(c *gin.Context) {
 func handleTriggerRecovery(c *gin.Context) {
 	var req struct {
 		MFACode string `json:"mfa_code" binding:"required"`
+		Filepath string `json:"filepath"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "MFA code required for recovery operations"})
@@ -353,10 +440,41 @@ func handleTriggerRecovery(c *gin.Context) {
 		}
 	}
 
+	// Trigger Isolated Restore test first
+	bre, err := security.NewBackupRestoreEngine(globalDB, os.Getenv("BACKUP_ENCRYPTION_KEY"))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to initialize backup engine: %v", err)})
+		return
+	}
+
+	targetFile := req.Filepath
+	if targetFile == "" {
+		// Use most recent completed backup if not specified
+		if globalDB != nil {
+			_ = globalDB.Pool.QueryRow(c.Request.Context(),
+				"SELECT filepath FROM backup_history WHERE status = 'COMPLETED' ORDER BY timestamp DESC LIMIT 1").Scan(&targetFile)
+		}
+	}
+
+	if targetFile == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "No backup file found or specified for recovery verification"})
+		return
+	}
+
+	dbUser := getEnv("DB_USER", "velyxora")
+	dbPass := getEnv("DB_PASSWORD", "super-secure-db-password-123")
+
+	success, results, err := bre.RunIsolatedRestoreTest(c.Request.Context(), targetFile, dbUser, dbPass)
+	if err != nil || !success {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Isolated Restore Verification Failed: %v", err)})
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"message": "Disaster recovery journal replay completed successfully",
+		"message": "Disaster recovery isolated restore validation completed successfully",
 		"status":  "SUCCESS",
-		"replayed": 12,
+		"replayed": results["users_count"],
+		"details": results,
 	})
 }
 
