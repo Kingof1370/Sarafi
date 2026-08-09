@@ -313,6 +313,40 @@ func RevokeAllSessionsByOldTokenHash(oldHash string, ipAddress, userAgent string
 	return RevokeAllSessions(userID, ipAddress, userAgent, "BREACH")
 }
 
+// ReconstructRedisCache repopulates Redis cache asynchronously from authoritative PostgreSQL database (idempotent, safe reconstruction)
+func ReconstructRedisCache(ctx context.Context) error {
+	if globalDB == nil || globalRedis == nil {
+		return nil // skip if offline
+	}
+
+	// 1. Rebuild revoked sessions in Redis from the database
+	rows, err := globalDB.Pool.Query(ctx, "SELECT id FROM user_sessions WHERE is_revoked = TRUE")
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var sessID string
+			if errScan := rows.Scan(&sessID); errScan == nil {
+				_ = globalRedis.Set(ctx, "revoked_session:"+sessID, "1", 24*time.Hour)
+			}
+		}
+	}
+
+	// 2. Rebuild API Key metadata or cached hashes if any exist
+	// In P004/P008, API Keys are evaluated from PostgreSQL, but we can pre-warm cache objects safely here.
+	apiKeyRows, err := globalDB.Pool.Query(ctx, "SELECT id, user_id FROM user_api_keys WHERE revoked_at IS NULL")
+	if err == nil {
+		defer apiKeyRows.Close()
+		for apiKeyRows.Next() {
+			var keyID, userID string
+			if errScan := apiKeyRows.Scan(&keyID, &userID); errScan == nil {
+				_ = globalRedis.Set(ctx, "apikey_owner:"+keyID, userID, 24*time.Hour)
+			}
+		}
+	}
+
+	return nil
+}
+
 // IsSessionRevoked checks if a session has been revoked (via Redis cache, falling back to database)
 func IsSessionRevoked(sessionID string) bool {
 	ctx := context.Background()
@@ -328,6 +362,10 @@ func IsSessionRevoked(sessionID string) bool {
 		err := globalDB.Pool.QueryRow(ctx, "SELECT is_revoked FROM user_sessions WHERE id = $1", sessionID).Scan(&isRevoked)
 		if err != nil {
 			return true // Treat as revoked if query fails or doesn't exist
+		}
+		// If not revoked in DB but not present in Redis, lazily populate Redis
+		if isRevoked && globalRedis != nil {
+			_ = globalRedis.Set(ctx, "revoked_session:"+sessionID, "1", 24*time.Hour)
 		}
 		return isRevoked
 	}

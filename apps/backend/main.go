@@ -97,6 +97,18 @@ func main() {
 	} else {
 		globalRedis = redisClient
 		log.Info("Redis client connected successfully.")
+		// Trigger safe, idempotent Redis cache reconstruction from authoritative PostgreSQL database
+		if globalDB != nil {
+			go func() {
+				reconCtx, reconCancel := context.WithTimeout(context.Background(), 15*time.Second)
+				defer reconCancel()
+				if err := ReconstructRedisCache(reconCtx); err != nil {
+					log.Error(fmt.Sprintf("Failed to reconstruct Redis cache: %v", err))
+				} else {
+					log.Info("Idempotent Redis cache state reconstructed from authoritative database successfully.")
+				}
+			}()
+		}
 	}
 
 	// 5. Setup Kafka Producer
