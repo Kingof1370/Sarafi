@@ -683,7 +683,7 @@ func main() {
 		wallet.Use(UnifiedAuthMiddleware(cfg.JWTSecret))
 		{
 			// Fetch user asset balances
-			wallet.GET("/balances", func(c *gin.Context) {
+			wallet.GET("/balances", RBACMiddleware("wallet:read"), func(c *gin.Context) {
 				claims, _ := c.Get("claims")
 				userClaims := claims.(*security.Claims)
 
@@ -713,7 +713,7 @@ func main() {
 			})
 
 			// Request deposit wallet address validation/allocation
-			wallet.POST("/address", func(c *gin.Context) {
+			wallet.POST("/address", RBACMiddleware("wallet:write"), func(c *gin.Context) {
 				var req struct {
 					Asset string `json:"asset" binding:"required"`
 				}
@@ -754,7 +754,7 @@ func main() {
 			})
 
 			// Process withdrawal requests
-			wallet.POST("/withdraw", func(c *gin.Context) {
+			wallet.POST("/withdraw", RBACMiddleware("wallet:write"), func(c *gin.Context) {
 				var req struct {
 					Asset   string  `json:"asset" binding:"required"`
 					Amount  float64 `json:"amount" binding:"required,gt=0"`
@@ -768,6 +768,11 @@ func main() {
 
 				claims, _ := c.Get("claims")
 				userClaims := claims.(*security.Claims)
+
+				// Enforce Multi-Factor Authentication (MFA)
+				if !VerifyMFAProtection(c, userClaims.UserID) {
+					return
+				}
 
 				adapter, err := common.GetBlockchainAdapter(req.Asset)
 				if err != nil {
@@ -860,7 +865,7 @@ func main() {
 			})
 
 			// Deposit Compliance Integration (P0008 + P0009)
-			wallet.POST("/deposits/mock", func(c *gin.Context) {
+			wallet.POST("/deposits/mock", RBACMiddleware("wallet:write"), func(c *gin.Context) {
 				var req struct {
 					Asset   string  `json:"asset" binding:"required"`
 					Amount  float64 `json:"amount" binding:"required,gt=0"`
@@ -951,7 +956,7 @@ func main() {
 				})
 			})
 
-			wallet.GET("/deposits/history", func(c *gin.Context) {
+			wallet.GET("/deposits/history", RBACMiddleware("wallet:read"), func(c *gin.Context) {
 				claims, _ := c.Get("claims")
 				userClaims := claims.(*security.Claims)
 
