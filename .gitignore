@@ -1,0 +1,155 @@
+# Environment Variables
+.env
+.env.local
+.env.*.local
+.env.production
+.env.development
+*.env
+
+# Secrets & Keys
+/secrets/
+/certs/
+/keys/
+*.pem
+*.key
+*.p12
+*.pfx
+*.der
+/etc/ssl/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+.project
+.classpath
+*.sublime-project
+*.sublime-workspace
+
+# Build
+/bin/
+/build/
+/dist/
+*.so
+*.dylib
+*.dll
+*.exe
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+/data/
+pgdata/
+redisdata/
+
+# Node
+node_modules/
+/app/frontend/node_modules/
+/apps/frontend/node_modules/
+.npm
+.yarn
+*.tsbuildinfo
+next-env.d.ts
+
+# Go
+*.o
+*.a
+*.so
+*.dylib
+go.sum
+/vendor/
+
+# Testing
+/coverage/
+/*.out
+*.test
+.nyc_output/
+
+# Docker
+.docker/
+docker-compose.override.yml
+
+# Temporary
+/tmp/
+/temp/
+*.tmp
+*.bak
+*.backup
+*~
+
+# OS
+Thumbs.db
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# AWS
+.aws/
+*.plist
+
+# Kubernetes
+/kubeconfig
+*.kubeconfig
+
+# Backup files
+*.backup
+*.sql.gz
+*.tar.gz
+/backups/
+
+# API Keys & Credentials (NEVER COMMIT)
+.env.*.key
+config/secrets.yaml
+config/credentials.json
+/vault/
+
+# Cache
+.cache/
+.eslintcache
+.pytest_cache/
+__pycache__/
+*.pyc
+
+# Dependencies lock (sometimes)
+# yarn.lock
+# package-lock.json
+
+# IDE Specific
+.vscode/settings.json
+.vscode/extensions.json
+.idea/workspace.xml
+.idea/tasks.xml
+
+# CI/CD
+.github/workflows/*.local.yml
+
+# Vendor & Third-party
+/vendor/
+/node_modules/
+/.venv/
+/venv/
+
+# Generated files
+*.pb.go
+*.pb.gw.go
+
+# Certificates
+/certs/
+*.crt
+*.csr
+*.key
+
+# Performance
+*.prof
+*.pprof
