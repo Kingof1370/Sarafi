@@ -103,7 +103,8 @@ func (re *RecoveryEngine) ReplayJournal(matcher *Matcher) (int, error) {
 }
 
 func (re *RecoveryEngine) writeRecord(record JournalRecord) error {
-	file, err := os.OpenFile(re.filepath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	// Secure files with tight 0600 (owner read-write only) permissions
+	file, err := os.OpenFile(re.filepath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		return fmt.Errorf("failed to open sequence journal for write: %w", err)
 	}
