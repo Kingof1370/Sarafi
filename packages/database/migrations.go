@@ -834,6 +834,21 @@ var schemaMigrations = []Migration{
 			CREATE INDEX IF NOT EXISTS idx_sre_alerts_metric ON sre_alerts(metric_name);
 		`,
 	},
+	{
+		ID:   39,
+		Name: "optimize_performance_indices",
+		SQL: `
+			CREATE INDEX IF NOT EXISTS idx_orders_user_id ON orders(user_id);
+			CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
+			CREATE INDEX IF NOT EXISTS idx_orders_symbol ON orders(symbol);
+			CREATE INDEX IF NOT EXISTS idx_deposits_user_id ON deposits(user_id);
+			CREATE INDEX IF NOT EXISTS idx_withdrawals_user_id ON withdrawals(user_id);
+			CREATE INDEX IF NOT EXISTS idx_ledger_entries_user_id ON ledger_entries(user_id);
+			CREATE INDEX IF NOT EXISTS idx_kyc_profiles_user_id ON kyc_profiles(user_id);
+			CREATE INDEX IF NOT EXISTS idx_compliance_alerts_user_id ON compliance_alerts(user_id);
+			CREATE INDEX IF NOT EXISTS idx_account_restrictions_user_id ON account_restrictions(user_id);
+		`,
+	},
 }
 
 // RunMigrations executes schema migration steps on the pgx connection pool

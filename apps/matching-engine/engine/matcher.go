@@ -86,8 +86,15 @@ func (m *Matcher) MatchOrder(order *types.Order) []*types.Trade {
 				}
 
 				m.SequenceNum++
+				nowNano := time.Now().UnixNano()
+				tradeIDBytes := make([]byte, 0, 32)
+				tradeIDBytes = append(tradeIDBytes, "trd_"...)
+				tradeIDBytes = strconv.AppendInt(tradeIDBytes, nowNano, 10)
+				tradeIDBytes = append(tradeIDBytes, '_')
+				tradeIDBytes = strconv.AppendInt(tradeIDBytes, m.SequenceNum, 10)
+
 				trade := &types.Trade{
-					ID:          "trd_" + strconv.FormatInt(time.Now().UnixNano(), 10) + "_" + strconv.FormatInt(m.SequenceNum, 10),
+					ID:          string(tradeIDBytes),
 					Symbol:      m.Symbol,
 					BuyerID:     order.UserID,
 					SellerID:    sellOrder.UserID,
@@ -149,8 +156,15 @@ func (m *Matcher) MatchOrder(order *types.Order) []*types.Trade {
 				}
 
 				m.SequenceNum++
+				nowNano := time.Now().UnixNano()
+				tradeIDBytes := make([]byte, 0, 32)
+				tradeIDBytes = append(tradeIDBytes, "trd_"...)
+				tradeIDBytes = strconv.AppendInt(tradeIDBytes, nowNano, 10)
+				tradeIDBytes = append(tradeIDBytes, '_')
+				tradeIDBytes = strconv.AppendInt(tradeIDBytes, m.SequenceNum, 10)
+
 				trade := &types.Trade{
-					ID:          "trd_" + strconv.FormatInt(time.Now().UnixNano(), 10) + "_" + strconv.FormatInt(m.SequenceNum, 10),
+					ID:          string(tradeIDBytes),
 					Symbol:      m.Symbol,
 					BuyerID:     buyOrder.UserID,
 					SellerID:    order.UserID,
