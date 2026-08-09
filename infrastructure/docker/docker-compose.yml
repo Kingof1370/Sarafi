@@ -5,13 +5,18 @@ services:
     image: postgres:16-alpine
     container_name: velyxora-db
     environment:
-      POSTGRES_USER: velyxora
-      POSTGRES_PASSWORD: super-secure-db-password-123
-      POSTGRES_DB: velyxora
+      POSTGRES_USER: ${DB_USER:-velyxora}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-super-secure-db-password-123}
+      POSTGRES_DB: ${DB_NAME:-velyxora}
     ports:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1024M
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U velyxora -d velyxora"]
       interval: 5s
@@ -25,6 +30,11 @@ services:
       - "6379:6379"
     volumes:
       - redisdata:/data
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -37,6 +47,11 @@ services:
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
 
   kafka:
     image: confluentinc/cp-kafka:7.5.0
@@ -53,6 +68,11 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1024M
     healthcheck:
       test: ["CMD-SHELL", "kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
       interval: 10s
@@ -61,7 +81,7 @@ services:
 
   api-gateway:
     build:
-      context: .
+      context: ../..
       dockerfile: apps/backend/Dockerfile
     container_name: velyxora-api-gateway
     ports:
@@ -70,13 +90,21 @@ services:
       - PORT=8080
       - LOG_LEVEL=DEBUG
       - LOG_FORMAT=JSON
-      - JWT_SECRET=velyxora-jwt-secret-key-signature
+      - APP_ENV=${APP_ENV:-development}
+      - JWT_SECRET=${JWT_SECRET:-velyxora-jwt-secret-key-signature}
+      - API_KEY_MASTER_SECRET=${API_KEY_MASTER_SECRET:-velyxora-apikeys-master-key-32b}
+      - BACKUP_ENCRYPTION_KEY=${BACKUP_ENCRYPTION_KEY:-velyxora-backup-default-aes-key32}
       - DB_HOST=postgres
-      - DB_USER=velyxora
-      - DB_PASSWORD=super-secure-db-password-123
-      - DB_NAME=velyxora
+      - DB_USER=${DB_USER:-velyxora}
+      - DB_PASSWORD=${DB_PASSWORD:-super-secure-db-password-123}
+      - DB_NAME=${DB_NAME:-velyxora}
       - REDIS_ADDR=redis:6379
       - KAFKA_BROKERS=kafka:29092
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1024M
     depends_on:
       postgres:
         condition: service_healthy
@@ -87,26 +115,44 @@ services:
 
   matching-engine:
     build:
-      context: .
+      context: ../..
       dockerfile: apps/matching-engine/Dockerfile
     container_name: velyxora-matching-engine
     environment:
       - KAFKA_BROKERS=kafka:29092
+      - APP_ENV=${APP_ENV:-development}
+      - JWT_SECRET=${JWT_SECRET:-velyxora-jwt-secret-key-signature}
+      - API_KEY_MASTER_SECRET=${API_KEY_MASTER_SECRET:-velyxora-apikeys-master-key-32b}
+      - BACKUP_ENCRYPTION_KEY=${BACKUP_ENCRYPTION_KEY:-velyxora-backup-default-aes-key32}
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2048M
     depends_on:
       kafka:
         condition: service_healthy
 
   wallet-service:
     build:
-      context: .
+      context: ../..
       dockerfile: apps/wallet-service/Dockerfile
     container_name: velyxora-wallet-service
     environment:
       - DB_HOST=postgres
-      - DB_USER=velyxora
-      - DB_PASSWORD=super-secure-db-password-123
-      - DB_NAME=velyxora
+      - DB_USER=${DB_USER:-velyxora}
+      - DB_PASSWORD=${DB_PASSWORD:-super-secure-db-password-123}
+      - DB_NAME=${DB_NAME:-velyxora}
       - KAFKA_BROKERS=kafka:29092
+      - APP_ENV=${APP_ENV:-development}
+      - JWT_SECRET=${JWT_SECRET:-velyxora-jwt-secret-key-signature}
+      - API_KEY_MASTER_SECRET=${API_KEY_MASTER_SECRET:-velyxora-apikeys-master-key-32b}
+      - BACKUP_ENCRYPTION_KEY=${BACKUP_ENCRYPTION_KEY:-velyxora-backup-default-aes-key32}
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1024M
     depends_on:
       postgres:
         condition: service_healthy
@@ -115,13 +161,18 @@ services:
 
   frontend:
     build:
-      context: .
+      context: ../..
       dockerfile: apps/frontend/Dockerfile
     container_name: velyxora-frontend
     ports:
       - "3000:3000"
     environment:
       - NEXT_PUBLIC_API_URL=http://localhost:8080/api/v1
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
     depends_on:
       - api-gateway
 

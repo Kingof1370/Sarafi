@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: velyxora-config
+  namespace: velyxora
+data:
+  DB_HOST: "postgres.velyxora.svc.cluster.local"
+  DB_PORT: "5432"
+  DB_NAME: "velyxora"
+  DB_USER: "velyxuser"
+  DB_SSLMODE: "require"
+  REDIS_ADDR: "redis-master.velyxora.svc.cluster.local:6379"
+  KAFKA_BROKERS: "velyxora-kafka.velyxora.svc.cluster.local:9092"
+  LOG_LEVEL: "INFO"
+  LOG_FORMAT: "JSON"
+  COMPLIANCE_MODE: "production"
+  MFA_TRADING_THRESHOLD: "10000.0"
+  APP_ENV: "production"

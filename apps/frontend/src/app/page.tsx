@@ -199,6 +199,9 @@ export default function Home() {
   const [kycDocId, setKycDocId] = useState<string>('');
   const [kycStatusMsg, setKycStatusMsg] = useState<string>('');
 
+  // Real user balances state loaded dynamically from backend in production
+  const [userBalances, setUserBalances] = useState<{ asset: string; available: number; locked: number; total: number }[]>([]);
+
   // Mock Deposit states
   const [depAsset, setDepAsset] = useState<string>('USDT');
   const [depAmount, setDepAmount] = useState<string>('2500');
@@ -258,6 +261,16 @@ export default function Home() {
       console.error('Failed to load portfolio feeds', err);
     }
   }, [accessToken, symbol]);
+
+  const fetchBalances = useCallback(async () => {
+    if (!accessToken) return;
+    try {
+      const res = await api.get('/wallet/balances');
+      setUserBalances(res.data.balances || []);
+    } catch (err) {
+      console.error('Failed to load real user balances', err);
+    }
+  }, [accessToken]);
 
   const fetchSecurityState = useCallback(async () => {
     if (!accessToken) return;
@@ -482,16 +495,18 @@ export default function Home() {
   useEffect(() => {
     if (accessToken) {
       fetchOrders();
+      fetchBalances();
       fetchSecurityState();
       fetchComplianceState();
       const interval = setInterval(() => {
         fetchOrders();
+        fetchBalances();
         fetchSecurityState();
         fetchComplianceState();
       }, 4000);
       return () => clearInterval(interval);
     }
-  }, [accessToken, fetchOrders, fetchSecurityState, fetchComplianceState]);
+  }, [accessToken, fetchOrders, fetchBalances, fetchSecurityState, fetchComplianceState]);
 
   const totalCost = parseFloat(price) * parseFloat(quantity);
   const estimatedFees = totalCost * (side === 'BUY' ? 0.002 : 0.001);
@@ -730,11 +745,25 @@ export default function Home() {
           <section className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-xl flex flex-col justify-between">
             <div>
               <h3 className="text-sm font-bold text-slate-300 border-b border-slate-800 pb-2 mb-3">Portfolio Allocations</h3>
-              <div className="space-y-4">
-                <div className="bg-slate-950 p-3 rounded-lg border border-slate-800/60">
-                  <span className="block text-[10px] text-slate-500 font-medium">Estimated Balance Sheet (USDT)</span>
-                  <span className="block text-lg font-bold text-slate-200 mt-1">$15,450.00</span>
-                </div>
+              <div className="space-y-3 max-h-64 overflow-y-auto">
+                {userBalances.length === 0 ? (
+                  <div className="p-3 bg-slate-950 border border-slate-800/40 rounded-lg text-center text-xs text-slate-500">
+                    No active balances loaded. Submit a simulated deposit on the Compliance tab to credit asset accounts.
+                  </div>
+                ) : (
+                  userBalances.map((bal) => (
+                    <div key={bal.asset} className="bg-slate-950 p-3 rounded-lg border border-slate-800/60 text-xs">
+                      <div className="flex justify-between font-bold text-cyan-400">
+                        <span>{bal.asset}</span>
+                        <span>Total: {bal.total}</span>
+                      </div>
+                      <div className="flex justify-between text-[11px] text-slate-400 mt-1">
+                        <span>Available: {bal.available}</span>
+                        <span>Locked: {bal.locked}</span>
+                      </div>
+                    </div>
+                  ))
+                )}
               </div>
             </div>
 

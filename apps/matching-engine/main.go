@@ -13,6 +13,7 @@ import (
 
 	"velyxora/packages/common"
 	"velyxora/packages/logger"
+	"velyxora/packages/security"
 	"velyxora/packages/types"
 )
 
@@ -45,6 +46,12 @@ func main() {
 	})
 
 	log.Info("Starting Velyxora Matching Engine...")
+
+	// Validate production configuration (Fail Closed!)
+	if err := security.ValidateProductionEnvironment(); err != nil {
+		log.Error(fmt.Sprintf("FATAL: Insecure production environment configuration: %v", err))
+		os.Exit(1)
+	}
 
 	kafkaBrokers := strings.Split(getEnv("KAFKA_BROKERS", "localhost:9092"), ",")
 	consumer := common.NewKafkaConsumer(kafkaBrokers, "velyxora-orders", "matching-engine-group")

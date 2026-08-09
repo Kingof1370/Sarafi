@@ -50,6 +50,12 @@ func main() {
 
 	log.Info("Starting Velyxora API Gateway...")
 
+	// Validate production configuration (Fail Closed!)
+	if err := security.ValidateProductionEnvironment(); err != nil {
+		log.Error(fmt.Sprintf("FATAL: Insecure production environment configuration: %v", err))
+		os.Exit(1)
+	}
+
 	// 2. Load Configuration
 	cfg := Config{
 		Port:         getEnv("PORT", "8080"),
