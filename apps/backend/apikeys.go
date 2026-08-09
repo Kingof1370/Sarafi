@@ -3,79 +3,69 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"velyxora/packages/security"
 )
 
-var apiMasterSecret []byte
+var (
+	globalKeyManager *security.KeyManager
+	kmOnce           sync.Once
+)
 
-func init() {
-	secretStr := os.Getenv("API_KEY_MASTER_SECRET")
-	if len(secretStr) >= 32 {
-		apiMasterSecret = []byte(secretStr[:32])
-	} else {
-		// Secure robust fallback for local developer runtimes
-		apiMasterSecret = []byte("velyxora-apikeys-master-key-32b")
-	}
+func GetKeyManager() *security.KeyManager {
+	kmOnce.Do(func() {
+		secretStr := os.Getenv("API_KEY_MASTER_SECRET")
+		if secretStr == "" {
+			secretStr = "velyxora-apikeys-master-key-32b"
+		}
+
+		versions := map[string]string{
+			"1": secretStr,
+		}
+
+		// Load other dynamic key versions if configured for rotation
+		for i := 2; i <= 10; i++ {
+			verKey := os.Getenv(fmt.Sprintf("API_KEY_VERSION_%d", i))
+			if verKey != "" {
+				versions[fmt.Sprintf("%d", i)] = verKey
+			}
+		}
+
+		activeVer := os.Getenv("API_KEY_ACTIVE_VERSION")
+		if activeVer == "" {
+			activeVer = "1"
+		}
+
+		km, err := security.NewKeyManager(versions, activeVer, "velyxora-apikeys-master-key-32b")
+		if err != nil {
+			panic(fmt.Sprintf("failed to initialize security cryptographic key manager: %v", err))
+		}
+		globalKeyManager = km
+	})
+	return globalKeyManager
 }
 
-// EncryptSecret encrypts a raw API secret using AES-256-GCM.
+// EncryptSecret encrypts a raw API secret using centralized KeyManager (supports versioning and rotation).
 func EncryptSecret(secret string) (string, error) {
-	block, err := aes.NewCipher(apiMasterSecret)
-	if err != nil {
-		return "", err
-	}
-	aesGCM, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", err
-	}
-	nonce := make([]byte, aesGCM.NonceSize())
-	if _, err = io.ReadFull(rand.Reader, nonce); err != nil {
-		return "", err
-	}
-	ciphertext := aesGCM.Seal(nonce, nonce, []byte(secret), nil)
-	return hex.EncodeToString(ciphertext), nil
+	return GetKeyManager().Encrypt(secret)
 }
 
-// DecryptSecret decrypts an encrypted API secret using AES-256-GCM.
+// DecryptSecret decrypts an encrypted API secret using centralized KeyManager (supports versioning and rotation).
 func DecryptSecret(encryptedHex string) (string, error) {
-	data, err := hex.DecodeString(encryptedHex)
-	if err != nil {
-		return "", err
-	}
-	block, err := aes.NewCipher(apiMasterSecret)
-	if err != nil {
-		return "", err
-	}
-	aesGCM, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", err
-	}
-	nonceSize := aesGCM.NonceSize()
-	if len(data) < nonceSize {
-		return "", errors.New("ciphertext too short")
-	}
-	nonce, ciphertext := data[:nonceSize], data[nonceSize:]
-	plaintext, err := aesGCM.Open(nil, nonce, ciphertext, nil)
-	if err != nil {
-		return "", err
-	}
-	return string(plaintext), nil
+	return GetKeyManager().Decrypt(encryptedHex)
 }
 
 // ParseAndValidateIPAllowlist parses a comma-separated list of IP addresses or CIDR blocks and normalizes them.

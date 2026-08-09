@@ -49,17 +49,23 @@ func main() {
 
 	log.Info("Starting Velyxora API Gateway...")
 
-	// 2. Load Configuration
+	// 2. Load Configuration using centralized secure validator
+	loadedCfg, err := security.LoadAndValidateConfig(nil)
+	if err != nil {
+		log.Error(fmt.Sprintf("Security Configuration Validation Blocked Startup: %v", err))
+		os.Exit(1)
+	}
+
 	cfg := Config{
-		Port:         getEnv("PORT", "8080"),
-		JWTSecret:    getEnv("JWT_SECRET", "super-secret-velyxora-key-999"),
-		DBHost:       getEnv("DB_HOST", "localhost"),
-		DBPort:       5432,
-		DBUser:       getEnv("DB_USER", "postgres"),
-		DBPassword:   getEnv("DB_PASSWORD", "postgres"),
-		DBName:       getEnv("DB_NAME", "velyxora"),
-		RedisAddr:    getEnv("REDIS_ADDR", "localhost:6379"),
-		KafkaBrokers: strings.Split(getEnv("KAFKA_BROKERS", "localhost:9092"), ","),
+		Port:         loadedCfg.Port,
+		JWTSecret:    loadedCfg.JWTSecret,
+		DBHost:       loadedCfg.DBHost,
+		DBPort:       loadedCfg.DBPort,
+		DBUser:       loadedCfg.DBUser,
+		DBPassword:   loadedCfg.DBPassword,
+		DBName:       loadedCfg.DBName,
+		RedisAddr:    loadedCfg.RedisAddr,
+		KafkaBrokers: loadedCfg.KafkaBrokers,
 	}
 	globalJWTSecret = cfg.JWTSecret
 
@@ -121,25 +127,65 @@ func main() {
 	r := gin.New()
 	r.Use(gin.Recovery())
 
-	// Security Headers Middleware
+	// Security Headers Middleware (SOC2 & HSTS compliant)
 	r.Use(func(c *gin.Context) {
 		c.Writer.Header().Set("X-Frame-Options", "DENY")
 		c.Writer.Header().Set("X-Content-Type-Options", "nosniff")
 		c.Writer.Header().Set("X-XSS-Protection", "1; mode=block")
 		c.Writer.Header().Set("Content-Security-Policy", "default-src 'self'")
 		c.Writer.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		c.Writer.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload")
 		c.Next()
 	})
 
-	// CORS Policy Middleware
+	// CORS Policy Middleware (Rejects unsafe CORS defaults in production)
 	r.Use(func(c *gin.Context) {
-		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+		env := os.Getenv("APP_ENV")
+		origin := c.GetHeader("Origin")
+
+		if strings.ToLower(env) == "production" {
+			allowedStr := os.Getenv("CORS_ALLOWED_ORIGINS")
+			if allowedStr == "" {
+				// No origins configured in production -> Fail closed!
+				if origin != "" {
+					c.JSON(http.StatusForbidden, gin.H{"error": "Forbidden: CORS origin validation failed"})
+					c.Abort()
+					return
+				}
+			} else {
+				allowedList := strings.Split(allowedStr, ",")
+				matched := false
+				for _, a := range allowedList {
+					if strings.TrimSpace(a) == origin {
+						matched = true
+						break
+					}
+				}
+				if !matched && origin != "" {
+					c.JSON(http.StatusForbidden, gin.H{"error": "Forbidden: CORS origin validation failed"})
+					c.Abort()
+					return
+				}
+			}
+		}
+
+		if origin != "" {
+			c.Writer.Header().Set("Access-Control-Allow-Origin", origin)
+		} else {
+			c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+		}
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, X-API-KEY, X-SIGNATURE, X-TIMESTAMP, X-NONCE, X-MFA-Code")
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(http.StatusNoContent)
 			return
 		}
+		c.Next()
+	})
+
+	// Strict Request-Size Limit Middleware to prevent DoS attacks
+	r.Use(func(c *gin.Context) {
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 10 * 1024 * 1024) // 10MB Limit
 		c.Next()
 	})
 
@@ -1140,8 +1186,11 @@ func main() {
 	}
 
 	srv := &http.Server{
-		Addr:    ":" + cfg.Port,
-		Handler: r,
+		Addr:         ":" + cfg.Port,
+		Handler:      r,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
+		IdleTimeout:  60 * time.Second,
 	}
 
 	// Graceful Shutdown Management

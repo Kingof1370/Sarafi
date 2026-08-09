@@ -2,7 +2,9 @@ package common
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -18,14 +20,25 @@ type RedisConfig struct {
 	Addr     string // "host:port"
 	Password string
 	DB       int
+	UseTLS   bool
 }
 
 // NewRedisClient creates and validates connection to Redis
 func NewRedisClient(cfg RedisConfig) (*RedisClient, error) {
+	var tlsConfig *tls.Config
+	if cfg.UseTLS || os.Getenv("REDIS_USE_TLS") == "true" {
+		insecure := os.Getenv("REDIS_TLS_INSECURE") == "true"
+		tlsConfig = &tls.Config{
+			MinVersion:         tls.VersionTLS12,
+			InsecureSkipVerify: insecure,
+		}
+	}
+
 	client := redis.NewClient(&redis.Options{
-		Addr:     cfg.Addr,
-		Password: cfg.Password,
-		DB:       cfg.DB,
+		Addr:      cfg.Addr,
+		Password:  cfg.Password,
+		DB:        cfg.DB,
+		TLSConfig: tlsConfig,
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

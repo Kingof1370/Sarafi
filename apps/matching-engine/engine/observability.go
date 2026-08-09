@@ -83,8 +83,8 @@ func (oe *ObservabilityEngine) CreateBackup(backupType string) (*BackupJob, erro
 	id := fmt.Sprintf("bk_%s_%d", backupType, time.Now().UnixNano())
 	path := fmt.Sprintf("/tmp/velyxora_backup_%s.json", id)
 
-	// Create a mock backup file on disk to verify file systems operations
-	file, err := os.Create(path)
+	// Create a mock backup file on disk to verify file systems operations with secure 0600 permissions
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
 		return nil, fmt.Errorf("failed to write backup payload to disk: %w", err)
 	}

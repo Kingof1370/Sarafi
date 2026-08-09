@@ -2,8 +2,10 @@ package common
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/segmentio/kafka-go"
@@ -21,11 +23,23 @@ type KafkaConsumer struct {
 
 // NewKafkaProducer establishes a connection to a Kafka broker list for writing events
 func NewKafkaProducer(brokers []string) *KafkaProducer {
+	var transport *kafka.Transport
+	if os.Getenv("KAFKA_USE_TLS") == "true" {
+		insecure := os.Getenv("KAFKA_TLS_INSECURE") == "true"
+		transport = &kafka.Transport{
+			TLS: &tls.Config{
+				MinVersion:         tls.VersionTLS12,
+				InsecureSkipVerify: insecure,
+			},
+		}
+	}
+
 	return &KafkaProducer{
 		Writer: &kafka.Writer{
-			Addr:     kafka.TCP(brokers...),
-			Balancer: &kafka.LeastBytes{},
-			Async:    false, // Wait for confirmation for high-critical events
+			Addr:      kafka.TCP(brokers...),
+			Balancer:  &kafka.LeastBytes{},
+			Async:     false, // Wait for confirmation for high-critical events
+			Transport: transport,
 		},
 	}
 }
@@ -57,6 +71,19 @@ func (p *KafkaProducer) Close() error {
 
 // NewKafkaConsumer initializes a reader that listens to Kafka events on a specific topic / group
 func NewKafkaConsumer(brokers []string, topic string, groupID string) *KafkaConsumer {
+	var dialer *kafka.Dialer
+	if os.Getenv("KAFKA_USE_TLS") == "true" {
+		insecure := os.Getenv("KAFKA_TLS_INSECURE") == "true"
+		dialer = &kafka.Dialer{
+			Timeout:   10 * time.Second,
+			DualStack: true,
+			TLS: &tls.Config{
+				MinVersion:         tls.VersionTLS12,
+				InsecureSkipVerify: insecure,
+			},
+		}
+	}
+
 	return &KafkaConsumer{
 		Reader: kafka.NewReader(kafka.ReaderConfig{
 			Brokers:  brokers,
@@ -65,6 +92,7 @@ func NewKafkaConsumer(brokers []string, topic string, groupID string) *KafkaCons
 			MinBytes: 10e3, // 10KB
 			MaxBytes: 10e6, // 10MB
 			MaxWait:  500 * time.Millisecond,
+			Dialer:   dialer,
 		}),
 	}
 }

@@ -1,10 +1,60 @@
 package common
 
 import (
+	"crypto/tls"
 	"errors"
+	"net/http"
+	"os"
 	"regexp"
 	"strings"
+	"time"
 )
+
+// SecureRPCClient manages production-grade secure TLS connections to Blockchain RPC endpoints.
+type SecureRPCClient struct {
+	Client  *http.Client
+	URL     string
+	Timeout time.Duration
+}
+
+// NewSecureRPCClient creates a hardened HTTP Client for JSON-RPC operations with forced TLS settings.
+func NewSecureRPCClient(url string, timeout time.Duration) (*SecureRPCClient, error) {
+	if url == "" {
+		return nil, errors.New("empty blockchain RPC URL")
+	}
+
+	// In production, reject non-HTTPS URLs
+	isProd := strings.ToLower(os.Getenv("APP_ENV")) == "production"
+	if isProd && !strings.HasPrefix(strings.ToLower(url), "https://") {
+		return nil, errors.New("security violation: production blockchain RPC connections must use HTTPS/TLS")
+	}
+
+	insecure := os.Getenv("BLOCKCHAIN_TLS_INSECURE") == "true"
+
+	tlsConfig := &tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: insecure,
+	}
+
+	transport := &http.Transport{
+		TLSClientConfig:       tlsConfig,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+
+	client := &http.Client{
+		Transport: transport,
+		Timeout:   timeout,
+	}
+
+	return &SecureRPCClient{
+		Client:  client,
+		URL:     url,
+		Timeout: timeout,
+	}, nil
+}
 
 // BlockchainAdapter represents generic validation, broadcasting, and verification capabilities
 type BlockchainAdapter interface {

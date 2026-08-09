@@ -2,6 +2,33 @@ package common
 
 import "testing"
 
+import (
+	"os"
+	"time"
+)
+
+func TestSecureRPCClient(t *testing.T) {
+	// Test environment check
+	os.Setenv("APP_ENV", "production")
+	defer os.Unsetenv("APP_ENV")
+
+	// Production should reject HTTP
+	_, err := NewSecureRPCClient("http://my-insecure-node.com", 2*time.Second)
+	if err == nil {
+		t.Error("Expected error when using HTTP RPC endpoint in production")
+	}
+
+	// Production should accept HTTPS
+	client, err := NewSecureRPCClient("https://my-secure-node.com", 2*time.Second)
+	if err != nil {
+		t.Errorf("Unexpected error with secure endpoint: %v", err)
+	}
+
+	if client.Timeout != 2*time.Second {
+		t.Errorf("Expected timeout 2s, got %v", client.Timeout)
+	}
+}
+
 func TestBlockchainAdapters(t *testing.T) {
 	btc, _ := GetBlockchainAdapter("BTC")
 	if !btc.ValidateAddress("1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2") {
