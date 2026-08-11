@@ -1,0 +1,15 @@
+{
+  "name": "Velyxora Exchange Cloud Terminal",
+  "image": "mcr.microsoft.com/devcontainers/universal:2",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {}
+  },
+  "forwardPorts": [3000, 8080],
+  "portsAttributes": {
+    "3000": {
+      "label": "Velyxora Live Exchange",
+      "onAutoForward": "openBrowser"
+    }
+  },
+  "postStartCommand": "docker compose -f infrastructure/docker/docker-compose.yml up --build -d"
+}
