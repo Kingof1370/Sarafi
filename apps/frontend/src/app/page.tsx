@@ -163,6 +163,7 @@ export default function Home() {
   // Terminal Feeds States
   const [orderStatus, setOrderStatus] = useState('');
   const [openOrders, setOpenOrders] = useState<AdvancedOrder[]>([]);
+  const [balances, setBalances] = useState<{ USDT: number; BTC: number; ETH: number }>({ USDT: 15450.0, BTC: 0.25, ETH: 1.5 });
   const [orderHistory, setOrderHistory] = useState<AdvancedOrder[]>([]);
   const [ticker, setTicker] = useState({ lastPrice: 50000.0, high: 50200.0, low: 49800.0, vol: 120.5, spread: 0.1 });
 
@@ -237,6 +238,11 @@ export default function Home() {
   const fetchOrders = useCallback(async () => {
     if (!accessToken) return;
     try {
+      const balRes = await api.get('/wallet/balances');
+      if (balRes.data && balRes.data.balances) {
+        setBalances(balRes.data.balances);
+      }
+
       const openRes = await api.get('/oms/open');
       setOpenOrders(openRes.data.orders || []);
 
@@ -733,7 +739,21 @@ export default function Home() {
               <div className="space-y-4">
                 <div className="bg-slate-950 p-3 rounded-lg border border-slate-800/60">
                   <span className="block text-[10px] text-slate-500 font-medium">Estimated Balance Sheet (USDT)</span>
-                  <span className="block text-lg font-bold text-slate-200 mt-1">$15,450.00</span>
+                  <span className="block text-lg font-bold text-slate-200 mt-1">${(balances.USDT + balances.BTC * ticker.lastPrice + balances.ETH * 3000).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDT</span>
+                </div>
+                <div className="grid grid-cols-3 gap-2 mt-3 text-xs">
+                  <div className="bg-slate-950/60 p-2 rounded border border-slate-800">
+                    <span className="block text-slate-500 text-[10px]">USDT</span>
+                    <span className="font-bold text-slate-200 font-mono">${balances.USDT.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                  </div>
+                  <div className="bg-slate-950/60 p-2 rounded border border-slate-800">
+                    <span className="block text-slate-500 text-[10px]">BTC</span>
+                    <span className="font-bold text-slate-200 font-mono">{balances.BTC.toFixed(4)}</span>
+                  </div>
+                  <div className="bg-slate-950/60 p-2 rounded border border-slate-800">
+                    <span className="block text-slate-500 text-[10px]">ETH</span>
+                    <span className="font-bold text-slate-200 font-mono">{balances.ETH.toFixed(4)}</span>
+                  </div>
                 </div>
               </div>
             </div>
