@@ -85,14 +85,16 @@ type AuditLogEntry struct {
 
 // TradingPairConfig stores validation limits for specific trading pairs
 type TradingPairConfig struct {
-	Symbol           string  `json:"symbol"`
-	MinOrderSize     float64 `json:"min_order_size"`
-	MaxOrderSize     float64 `json:"max_order_size"`
-	MinNotional      float64 `json:"min_notional"`
-	MaxNotional      float64 `json:"max_notional"`
-	TickSize         float64 `json:"tick_size"`         // price step
-	StepSize         float64 `json:"step_size"`         // quantity step
-	PricePrecision   int     `json:"price_precision"`
-	QuantityPrecision int     `json:"quantity_precision"`
-	IsActive         bool    `json:"is_active"`
+	Symbol               string  `json:"symbol"`
+	MinOrderSize         float64 `json:"min_order_size"`
+	MaxOrderSize         float64 `json:"max_order_size"`
+	MinNotional          float64 `json:"min_notional"`
+	MaxNotional          float64 `json:"max_notional"`
+	TickSize             float64 `json:"tick_size"`         // price step
+	StepSize             float64 `json:"step_size"`         // quantity step
+	PricePrecision       int     `json:"price_precision"`
+	QuantityPrecision    int     `json:"quantity_precision"`
+	PriceBandPercentage  float64 `json:"price_band_percentage"`
+	PriceBrandPercentage float64 `json:"price_brand_percentage"`
+	IsActive             bool    `json:"is_active"`
 }

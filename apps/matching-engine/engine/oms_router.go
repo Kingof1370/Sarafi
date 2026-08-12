@@ -24,7 +24,7 @@ type OMSRouter struct {
 
 // NewOMSRouter initializes the routing supervisor
 func NewOMSRouter(sm *OMSStateMachine, val *OMSValidator, risk *RiskEngine, matcher *Matcher, exec *ExecutionEngine, settle *SettlementEngine) *OMSRouter {
-	return &OMSRouter{
+	router := &OMSRouter{
 		stateMachine: sm,
 		validator:    val,
 		risk:         risk,
@@ -32,6 +32,17 @@ func NewOMSRouter(sm *OMSStateMachine, val *OMSValidator, risk *RiskEngine, matc
 		execution:    exec,
 		settlement:   settle,
 	}
+
+	if val != nil {
+		val.GetLastPrice = func(symbol string) float64 {
+			if matcher != nil && matcher.Symbol == symbol {
+				return matcher.GetLastPrice()
+			}
+			return 0
+		}
+	}
+
+	return router
 }
 
 // ProcessIncomingOrder processes orders through validation, risk hold, and matching pipelines
