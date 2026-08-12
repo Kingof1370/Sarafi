@@ -31,9 +31,11 @@ type FeesEngine struct {
 	zeroFeeMarkets   map[string]bool    // symbol -> is zero fee
 	feeOverrides     map[string]float64 // userID -> specific fee rate overrides
 	accumulatedFees  map[string]float64 // asset -> accumulated revenue
+	safuInsurance    map[string]float64 // asset -> SAFU insurance fund reserve
 	defaultMakerRate float64
 	defaultTakerRate float64
 	referralRate     float64            // e.g. 0.20 (20% of trading fee goes to referrer)
+	safuRate         float64            // e.g. 0.10 (10% of trading fee dynamically dedicated to SAFU)
 	vipTiers         []VIPConfig
 }
 
@@ -45,9 +47,11 @@ func NewFeesEngine(maker, taker float64) *FeesEngine {
 		zeroFeeMarkets:   make(map[string]bool),
 		feeOverrides:     make(map[string]float64),
 		accumulatedFees:  make(map[string]float64),
+		safuInsurance:    make(map[string]float64),
 		defaultMakerRate: maker,
 		defaultTakerRate: taker,
 		referralRate:     0.20, // 20% standard referral reward
+		safuRate:         0.10, // 10% dynamically goes to SAFU secure wallet reserve
 		vipTiers: []VIPConfig{
 			{Level: 0, MinVolume: 0.0, MakerRate: maker, TakerRate: taker},
 			{Level: 1, MinVolume: 100000.0, MakerRate: 0.0005, TakerRate: 0.0015},
@@ -135,21 +139,26 @@ func (fe *FeesEngine) CalculateFee(userID string, price, quantity float64, isMak
 	return price * quantity * rate
 }
 
-// ProcessCommission splits transaction fees into affiliate referral commissions and platform revenues
+// ProcessCommission splits transaction fees into affiliate referral commissions, SAFU reserves, and platform revenues
 func (fe *FeesEngine) ProcessCommission(userID, asset string, totalFee float64) (referrerID string, commission, revenue float64) {
 	fe.mu.Lock()
 	defer fe.mu.Unlock()
 
+	// Dedicate a flat rate dynamically to SAFU insurance reserve
+	safuCut := totalFee * fe.safuRate
+	fe.safuInsurance[asset] += safuCut
+	remainingFee := totalFee - safuCut
+
 	refID, hasReferrer := fe.referrals[userID]
 	if hasReferrer && refID != "" {
-		commission = totalFee * fe.referralRate
-		revenue = totalFee - commission
+		commission = remainingFee * fe.referralRate
+		revenue = remainingFee - commission
 		fe.accumulatedFees[asset] += revenue
 		return refID, commission, revenue
 	}
 
-	fe.accumulatedFees[asset] += totalFee
-	return "", 0.0, totalFee
+	fe.accumulatedFees[asset] += remainingFee
+	return "", 0.0, remainingFee
 }
 
 // GetAccumulatedRevenue retrieves collected fees by asset
@@ -157,4 +166,11 @@ func (fe *FeesEngine) GetAccumulatedRevenue(asset string) float64 {
 	fe.mu.RLock()
 	defer fe.mu.RUnlock()
 	return fe.accumulatedFees[asset]
+}
+
+// GetSAFUReserve retrieves the accumulated SAFU reserve balance for a given asset
+func (fe *FeesEngine) GetSAFUReserve(asset string) float64 {
+	fe.mu.RLock()
+	defer fe.mu.RUnlock()
+	return fe.safuInsurance[asset]
 }

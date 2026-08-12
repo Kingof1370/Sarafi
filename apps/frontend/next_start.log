@@ -1,0 +1,53 @@
+
+> frontend@0.1.0 start
+> next start
+
+  ▲ Next.js 14.2.3
+  - Local:        http://localhost:3000
+
+ ✓ Starting...
+ ✓ Ready in 834ms
+Secure CoinMarketCap fetch failed, falling back to Binance Error: CMC_API_KEY env variable is not set
+    at l (/app/apps/frontend/.next/server/app/api/ticker/route.js:1:663)
+    at /app/apps/frontend/node_modules/next/dist/compiled/next-server/app-route.runtime.prod.js:6:34672
+    at /app/apps/frontend/node_modules/next/dist/server/lib/trace/tracer.js:140:36
+    at NoopContextManager.with (/app/apps/frontend/node_modules/next/dist/compiled/@opentelemetry/api/index.js:1:7062)
+    at ContextAPI.with (/app/apps/frontend/node_modules/next/dist/compiled/@opentelemetry/api/index.js:1:518)
+    at NoopTracer.startActiveSpan (/app/apps/frontend/node_modules/next/dist/compiled/@opentelemetry/api/index.js:1:18093)
+    at ProxyTracer.startActiveSpan (/app/apps/frontend/node_modules/next/dist/compiled/@opentelemetry/api/index.js:1:18854)
+    at /app/apps/frontend/node_modules/next/dist/server/lib/trace/tracer.js:122:103
+    at NoopContextManager.with (/app/apps/frontend/node_modules/next/dist/compiled/@opentelemetry/api/index.js:1:7062)
+    at ContextAPI.with (/app/apps/frontend/node_modules/next/dist/compiled/@opentelemetry/api/index.js:1:518)
+Secure CoinMarketCap fetch failed, falling back to Binance Error: CMC_API_KEY env variable is not set
+    at l (/app/apps/frontend/.next/server/app/api/ticker/route.js:1:663)
+    at /app/apps/frontend/node_modules/next/dist/compiled/next-server/app-route.runtime.prod.js:6:34672
+    at /app/apps/frontend/node_modules/next/dist/server/lib/trace/tracer.js:140:36
+    at NoopContextManager.with (/app/apps/frontend/node_modules/next/dist/compiled/@opentelemetry/api/index.js:1:7062)
+    at ContextAPI.with (/app/apps/frontend/node_modules/next/dist/compiled/@opentelemetry/api/index.js:1:518)
+    at NoopTracer.startActiveSpan (/app/apps/frontend/node_modules/next/dist/compiled/@opentelemetry/api/index.js:1:18093)
+    at ProxyTracer.startActiveSpan (/app/apps/frontend/node_modules/next/dist/compiled/@opentelemetry/api/index.js:1:18854)
+    at /app/apps/frontend/node_modules/next/dist/server/lib/trace/tracer.js:122:103
+    at NoopContextManager.with (/app/apps/frontend/node_modules/next/dist/compiled/@opentelemetry/api/index.js:1:7062)
+    at ContextAPI.with (/app/apps/frontend/node_modules/next/dist/compiled/@opentelemetry/api/index.js:1:518)
+Secure CoinMarketCap fetch failed, falling back to Binance Error: CMC_API_KEY env variable is not set
+    at l (/app/apps/frontend/.next/server/app/api/ticker/route.js:1:663)
+    at /app/apps/frontend/node_modules/next/dist/compiled/next-server/app-route.runtime.prod.js:6:34672
+    at /app/apps/frontend/node_modules/next/dist/server/lib/trace/tracer.js:140:36
+    at NoopContextManager.with (/app/apps/frontend/node_modules/next/dist/compiled/@opentelemetry/api/index.js:1:7062)
+    at ContextAPI.with (/app/apps/frontend/node_modules/next/dist/compiled/@opentelemetry/api/index.js:1:518)
+    at NoopTracer.startActiveSpan (/app/apps/frontend/node_modules/next/dist/compiled/@opentelemetry/api/index.js:1:18093)
+    at ProxyTracer.startActiveSpan (/app/apps/frontend/node_modules/next/dist/compiled/@opentelemetry/api/index.js:1:18854)
+    at /app/apps/frontend/node_modules/next/dist/server/lib/trace/tracer.js:122:103
+    at NoopContextManager.with (/app/apps/frontend/node_modules/next/dist/compiled/@opentelemetry/api/index.js:1:7062)
+    at ContextAPI.with (/app/apps/frontend/node_modules/next/dist/compiled/@opentelemetry/api/index.js:1:518)
+Secure CoinMarketCap fetch failed, falling back to Binance Error: CMC_API_KEY env variable is not set
+    at l (/app/apps/frontend/.next/server/app/api/ticker/route.js:1:663)
+    at /app/apps/frontend/node_modules/next/dist/compiled/next-server/app-route.runtime.prod.js:6:34672
+    at /app/apps/frontend/node_modules/next/dist/server/lib/trace/tracer.js:140:36
+    at NoopContextManager.with (/app/apps/frontend/node_modules/next/dist/compiled/@opentelemetry/api/index.js:1:7062)
+    at ContextAPI.with (/app/apps/frontend/node_modules/next/dist/compiled/@opentelemetry/api/index.js:1:518)
+    at NoopTracer.startActiveSpan (/app/apps/frontend/node_modules/next/dist/compiled/@opentelemetry/api/index.js:1:18093)
+    at ProxyTracer.startActiveSpan (/app/apps/frontend/node_modules/next/dist/compiled/@opentelemetry/api/index.js:1:18854)
+    at /app/apps/frontend/node_modules/next/dist/server/lib/trace/tracer.js:122:103
+    at NoopContextManager.with (/app/apps/frontend/node_modules/next/dist/compiled/@opentelemetry/api/index.js:1:7062)
+    at ContextAPI.with (/app/apps/frontend/node_modules/next/dist/compiled/@opentelemetry/api/index.js:1:518)
