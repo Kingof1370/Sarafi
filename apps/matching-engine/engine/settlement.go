@@ -91,16 +91,72 @@ func (se *SettlementEngine) ProcessQueue(ctx context.Context) (int, int) {
 	failCount := 0
 
 	for _, job := range activeJobs {
-		// Strict Double Entry Accounting Validation: Total Debit MUST exactly match Total Credit + Fees precisely
-		tradeValue := common.SafeMul(job.Exec.Price, job.Exec.Quantity)
-		buyerDebit := common.SafeAdd(tradeValue, job.Exec.BuyerFee)
-		sellerCredit := common.SafeSub(tradeValue, job.Exec.SellerFee)
-		feeIncome := common.SafeAdd(job.Exec.BuyerFee, job.Exec.SellerFee)
+		// Strict Double Entry Accounting Validation: Total Debit MUST exactly match Total Credit + Fees precisely.
+		// Since we now support multi-asset fee payments (e.g. fees paid in VLX instead of the quote asset),
+		// we must perform validation on a per-asset basis.
 
-		// Verification: Buyer debit == Seller proceeds + Platform fees income
-		if buyerDebit != common.SafeAdd(sellerCredit, feeIncome) {
-			job.Status = SettleFailed
-			job.ErrorMsg = "Double Entry Validation Failure: accounting equations desynchronized"
+		// 1. Identify the assets involved in the double entry checks
+		// - BaseAsset: Seller debited, Buyer credited
+		// - QuoteAsset: Buyer debited, Seller credited (potentially adjusted for buyer/seller fees)
+		// - VLX/Other Fee Assets: Buyer/Seller debited, platform credited
+
+		tradeValue := common.SafeMul(job.Exec.Price, job.Exec.Quantity)
+
+		// Base asset balance flow:
+		// Buyer debit = -Quantity, Seller credit = -Quantity. Net change of base asset = 0.
+		// Let's verify quote asset and fee assets balance perfectly.
+
+		// Calculate expected debits and credits per asset:
+		// Map of expected net movement: asset -> balance (must sum to zero)
+		netMovement := make(map[string]float64)
+
+		// Buyer trade leg:
+		// Buyer receives BaseAsset: +Quantity
+		netMovement[job.BaseAsset] = common.SafeAdd(netMovement[job.BaseAsset], job.Exec.Quantity)
+
+		// Buyer pays QuoteAsset (price * quantity): -tradeValue
+		netMovement[job.QuoteAsset] = common.SafeSub(netMovement[job.QuoteAsset], tradeValue)
+
+		// Buyer fee:
+		buyerFeeAsset := job.Exec.BuyerFeeAsset
+		if buyerFeeAsset == "" {
+			buyerFeeAsset = job.QuoteAsset
+		}
+		// Buyer pays fee: -BuyerFee
+		netMovement[buyerFeeAsset] = common.SafeSub(netMovement[buyerFeeAsset], job.Exec.BuyerFee)
+		// Platform receives buyer fee: +BuyerFee
+		netMovement[buyerFeeAsset] = common.SafeAdd(netMovement[buyerFeeAsset], job.Exec.BuyerFee)
+
+		// Seller trade leg:
+		// Seller delivers BaseAsset: -Quantity
+		netMovement[job.BaseAsset] = common.SafeSub(netMovement[job.BaseAsset], job.Exec.Quantity)
+
+		// Seller receives QuoteAsset (price * quantity): +tradeValue
+		netMovement[job.QuoteAsset] = common.SafeAdd(netMovement[job.QuoteAsset], tradeValue)
+
+		// Seller fee:
+		sellerFeeAsset := job.Exec.SellerFeeAsset
+		if sellerFeeAsset == "" {
+			sellerFeeAsset = job.QuoteAsset
+		}
+		// Seller pays fee: -SellerFee
+		netMovement[sellerFeeAsset] = common.SafeSub(netMovement[sellerFeeAsset], job.Exec.SellerFee)
+		// Platform receives seller fee: +SellerFee
+		netMovement[sellerFeeAsset] = common.SafeAdd(netMovement[sellerFeeAsset], job.Exec.SellerFee)
+
+		// Verification: The net movement across ALL accounts for each involved asset must be exactly 0
+		valid := true
+		for asset, val := range netMovement {
+			// Allow for tiny floating point noise, but since common.SafeAdd/Sub are used, it should be exact or near-exact
+			if val < -1e-9 || val > 1e-9 {
+				valid = false
+				job.Status = SettleFailed
+				job.ErrorMsg = fmt.Sprintf("Double Entry Validation Failure: asset %s equation desynchronized (net movement: %f)", asset, val)
+				break
+			}
+		}
+
+		if !valid {
 			se.archiveJob(job)
 			failCount++
 			continue
@@ -150,14 +206,47 @@ func (se *SettlementEngine) executeSettlementTransaction(ctx context.Context, jo
 	}
 	defer tx.Rollback(ctx)
 
-	// 1. Debit Buyer Quote Asset: Price * Quantity + BuyerFee (from Reserved)
 	tradeValue := common.SafeMul(exec.Price, exec.Quantity)
-	buyerDebit := common.SafeAdd(tradeValue, exec.BuyerFee)
+
+	// Determine fee assets
+	buyerFeeAsset := exec.BuyerFeeAsset
+	if buyerFeeAsset == "" {
+		buyerFeeAsset = job.QuoteAsset
+	}
+	sellerFeeAsset := exec.SellerFeeAsset
+	if sellerFeeAsset == "" {
+		sellerFeeAsset = job.QuoteAsset
+	}
+
+	// 1. Debit Buyer Quote Asset (Price * Quantity) and potentially fee if paid in Quote asset (from Reserved)
+	// During order validation/reservation, the buyer had `Quantity * Price + BuyerRawFee` reserved in QuoteAsset.
+	// Since the actual fee could have been paid in VLX instead of the QuoteAsset, we must release the hold correctly:
+	// - If paid in QuoteAsset: reserved -= (tradeValue + BuyerFee), total -= (tradeValue + BuyerFee)
+	// - If paid in VLX: reserved -= (tradeValue + BuyerRawFee), total -= tradeValue.
+	//   And we also debit VLX from the buyer's balance: available -= BuyerFee (or total -= BuyerFee, but since it wasn't reserved, we subtract from available and total).
+	buyerQuoteReservedDebit := common.SafeAdd(tradeValue, exec.BuyerRawFee)
+	var buyerQuoteTotalDebit float64
+	if buyerFeeAsset == job.QuoteAsset {
+		buyerQuoteTotalDebit = common.SafeAdd(tradeValue, exec.BuyerFee)
+	} else {
+		buyerQuoteTotalDebit = tradeValue
+	}
+
 	_, err = tx.Exec(ctx,
-		"UPDATE balances SET reserved = reserved - $1, total = total - $1, updated_at = NOW() WHERE user_id = $2 AND asset = $3",
-		buyerDebit, exec.BuyerID, job.QuoteAsset)
+		"UPDATE balances SET reserved = reserved - $1, total = total - $2, updated_at = NOW() WHERE user_id = $3 AND asset = $4",
+		buyerQuoteReservedDebit, buyerQuoteTotalDebit, exec.BuyerID, job.QuoteAsset)
 	if err != nil {
 		return fmt.Errorf("failed to debit buyer quote balance: %w", err)
+	}
+
+	// If buyer paid fee in VLX/other asset, debit their available/total balance of that fee asset
+	if buyerFeeAsset != job.QuoteAsset {
+		_, err = tx.Exec(ctx,
+			"UPDATE balances SET available = available - $1, total = total - $1, updated_at = NOW() WHERE user_id = $2 AND asset = $3",
+			exec.BuyerFee, exec.BuyerID, buyerFeeAsset)
+		if err != nil {
+			return fmt.Errorf("failed to debit buyer fee balance in %s: %w", buyerFeeAsset, err)
+		}
 	}
 
 	// 2. Credit Buyer Base Asset: Quantity
@@ -177,8 +266,14 @@ func (se *SettlementEngine) executeSettlementTransaction(ctx context.Context, jo
 		return fmt.Errorf("failed to debit seller base balance: %w", err)
 	}
 
-	// 4. Credit Seller Quote Asset: Price * Quantity - SellerFee
-	sellerCredit := common.SafeSub(tradeValue, exec.SellerFee)
+	// 4. Credit Seller Quote Asset: Price * Quantity (potentially minus fee if paid in Quote asset)
+	var sellerCredit float64
+	if sellerFeeAsset == job.QuoteAsset {
+		sellerCredit = common.SafeSub(tradeValue, exec.SellerFee)
+	} else {
+		sellerCredit = tradeValue
+	}
+
 	_, err = tx.Exec(ctx,
 		"INSERT INTO balances (user_id, asset, available, total, updated_at) VALUES ($1, $2, $3, $3, NOW()) "+
 			"ON CONFLICT (user_id, asset) DO UPDATE SET available = balances.available + EXCLUDED.available, total = balances.total + EXCLUDED.total, updated_at = NOW()",
@@ -187,15 +282,34 @@ func (se *SettlementEngine) executeSettlementTransaction(ctx context.Context, jo
 		return fmt.Errorf("failed to credit seller quote balance: %w", err)
 	}
 
+	// If seller paid fee in VLX/other asset, debit their available/total balance of that fee asset
+	if sellerFeeAsset != job.QuoteAsset {
+		_, err = tx.Exec(ctx,
+			"UPDATE balances SET available = available - $1, total = total - $1, updated_at = NOW() WHERE user_id = $2 AND asset = $3",
+			exec.SellerFee, exec.SellerID, sellerFeeAsset)
+		if err != nil {
+			return fmt.Errorf("failed to debit seller fee balance in %s: %w", sellerFeeAsset, err)
+		}
+	}
+
 	// 5. Credit Platform Fee Account
 	platformFeeAccount := "platform_fees"
-	platformFeeAmt := common.SafeAdd(exec.BuyerFee, exec.SellerFee)
+	// Credit buyer fee to platform
 	_, err = tx.Exec(ctx,
 		"INSERT INTO balances (user_id, asset, available, total, updated_at) VALUES ($1, $2, $3, $3, NOW()) "+
 			"ON CONFLICT (user_id, asset) DO UPDATE SET available = balances.available + EXCLUDED.available, total = balances.total + EXCLUDED.total, updated_at = NOW()",
-		platformFeeAccount, job.QuoteAsset, platformFeeAmt)
+		platformFeeAccount, buyerFeeAsset, exec.BuyerFee)
 	if err != nil {
-		return fmt.Errorf("failed to credit platform fee balance: %w", err)
+		return fmt.Errorf("failed to credit platform buyer fee balance in %s: %w", buyerFeeAsset, err)
+	}
+
+	// Credit seller fee to platform
+	_, err = tx.Exec(ctx,
+		"INSERT INTO balances (user_id, asset, available, total, updated_at) VALUES ($1, $2, $3, $3, NOW()) "+
+			"ON CONFLICT (user_id, asset) DO UPDATE SET available = balances.available + EXCLUDED.available, total = balances.total + EXCLUDED.total, updated_at = NOW()",
+		platformFeeAccount, sellerFeeAsset, exec.SellerFee)
+	if err != nil {
+		return fmt.Errorf("failed to credit platform seller fee balance in %s: %w", sellerFeeAsset, err)
 	}
 
 	// 6. Record Dual Entry Ledger Postings
@@ -204,9 +318,19 @@ func (se *SettlementEngine) executeSettlementTransaction(ctx context.Context, jo
 	// Buyer quote debit
 	_, err = tx.Exec(ctx,
 		"INSERT INTO ledger_entries (id, ledger_tx_id, user_id, asset, type, amount, description, timestamp) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())",
-		"ent_b_q_"+exec.TradeID, ledgerTxID, exec.BuyerID, job.QuoteAsset, "DEBIT", buyerDebit, "Buyer execution quote cost")
+		"ent_b_q_"+exec.TradeID, ledgerTxID, exec.BuyerID, job.QuoteAsset, "DEBIT", buyerQuoteTotalDebit, "Buyer execution quote cost")
 	if err != nil {
 		return fmt.Errorf("failed to write buyer quote ledger: %w", err)
+	}
+
+	// If buyer paid fee in VLX, write corresponding ledger entry
+	if buyerFeeAsset != job.QuoteAsset {
+		_, err = tx.Exec(ctx,
+			"INSERT INTO ledger_entries (id, ledger_tx_id, user_id, asset, type, amount, description, timestamp) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())",
+			"ent_b_fee_"+exec.TradeID, ledgerTxID, exec.BuyerID, buyerFeeAsset, "DEBIT", exec.BuyerFee, "Buyer execution VLX fee payment")
+		if err != nil {
+			return fmt.Errorf("failed to write buyer fee ledger: %w", err)
+		}
 	}
 
 	// Buyer base credit
@@ -231,6 +355,31 @@ func (se *SettlementEngine) executeSettlementTransaction(ctx context.Context, jo
 		"ent_s_q_"+exec.TradeID, ledgerTxID, exec.SellerID, job.QuoteAsset, "CREDIT", sellerCredit, "Seller execution quote delivery")
 	if err != nil {
 		return fmt.Errorf("failed to write seller quote ledger: %w", err)
+	}
+
+	// If seller paid fee in VLX, write corresponding ledger entry
+	if sellerFeeAsset != job.QuoteAsset {
+		_, err = tx.Exec(ctx,
+			"INSERT INTO ledger_entries (id, ledger_tx_id, user_id, asset, type, amount, description, timestamp) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())",
+			"ent_s_fee_"+exec.TradeID, ledgerTxID, exec.SellerID, sellerFeeAsset, "DEBIT", exec.SellerFee, "Seller execution VLX fee payment")
+		if err != nil {
+			return fmt.Errorf("failed to write seller fee ledger: %w", err)
+		}
+	}
+
+	// Platform fee credits
+	_, err = tx.Exec(ctx,
+		"INSERT INTO ledger_entries (id, ledger_tx_id, user_id, asset, type, amount, description, timestamp) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())",
+		"ent_p_fee_b_"+exec.TradeID, ledgerTxID, platformFeeAccount, buyerFeeAsset, "CREDIT", exec.BuyerFee, "Platform revenue from buyer fee")
+	if err != nil {
+		return fmt.Errorf("failed to write platform buyer fee credit ledger: %w", err)
+	}
+
+	_, err = tx.Exec(ctx,
+		"INSERT INTO ledger_entries (id, ledger_tx_id, user_id, asset, type, amount, description, timestamp) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())",
+		"ent_p_fee_s_"+exec.TradeID, ledgerTxID, platformFeeAccount, sellerFeeAsset, "CREDIT", exec.SellerFee, "Platform revenue from seller fee")
+	if err != nil {
+		return fmt.Errorf("failed to write platform seller fee credit ledger: %w", err)
 	}
 
 	// Commit Transaction
