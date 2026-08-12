@@ -59,6 +59,7 @@ type UserPreferences struct {
 	Theme          string `json:"theme" db:"theme"` // e.g. "dark", "light"
 	Notifications  bool   `json:"notifications" db:"notifications"`
 	PreferredAsset string `json:"preferred_asset" db:"preferred_asset"` // e.g. "BTC"
+	PayFeesInVLX   bool   `json:"pay_fees_in_vlx" db:"pay_fees_in_vlx"`
 }
 
 // UserSession tracks authentication sessions, device fingerprints and rotation keys
