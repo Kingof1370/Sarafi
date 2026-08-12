@@ -163,7 +163,7 @@ export default function Home() {
   // Terminal Feeds States
   const [orderStatus, setOrderStatus] = useState('');
   const [openOrders, setOpenOrders] = useState<AdvancedOrder[]>([]);
-  const [balances, setBalances] = useState<{ USDT: number; BTC: number; ETH: number }>({ USDT: 15450.0, BTC: 0.25, ETH: 1.5 });
+  const [balances, setBalances] = useState<{ [key: string]: number }>({ USDT: 15450.0, BTC: 0.25, ETH: 1.5, SOL: 15.0, BNB: 5.0, ADA: 2500.0 });
   const [orderHistory, setOrderHistory] = useState<AdvancedOrder[]>([]);
   const [ticker, setTicker] = useState({ lastPrice: 50000.0, high: 50200.0, low: 49800.0, vol: 120.5, spread: 0.1 });
 
@@ -203,6 +203,10 @@ export default function Home() {
   // Mock Deposit states
   const [depAsset, setDepAsset] = useState<string>('USDT');
   const [depAmount, setDepAmount] = useState<string>('2500');
+
+  // Custom faucet states
+  const [faucetAsset, setFaucetAsset] = useState<string>('USDT');
+  const [faucetAmount, setFaucetAmount] = useState<string>('5000');
   const [depAddress, setDepAddress] = useState<string>('0x71C7656EC7ab88b098defB751B7401B5f6d1476B');
   const [depTxHash, setDepTxHash] = useState<string>('0x123abc456def');
   const [depStatusMsg, setDepStatusMsg] = useState<string>('');
@@ -235,6 +239,24 @@ export default function Home() {
     }
   };
 
+  const fetchTickerData = useCallback(async () => {
+    try {
+      const tradesRes = await api.get(`/oms/trades?symbol=${symbol}`);
+      const t = tradesRes.data.ticker;
+      if (t) {
+        setTicker({
+          lastPrice: t.last_price || 50000.0,
+          high: t.high_24h || 50200.0,
+          low: t.low_24h || 49800.0,
+          vol: t.volume_24h || 120.5,
+          spread: t.last_price * 0.0002 || 5.0,
+        });
+      }
+    } catch (err) {
+      console.error('Failed to load ticker feed', err);
+    }
+  }, [symbol]);
+
   const fetchOrders = useCallback(async () => {
     if (!accessToken) return;
     try {
@@ -248,22 +270,10 @@ export default function Home() {
 
       const histRes = await api.get('/oms/history');
       setOrderHistory(histRes.data.orders || []);
-
-      const tradesRes = await api.get(`/oms/trades?symbol=${symbol}`);
-      const t = tradesRes.data.ticker;
-      if (t) {
-        setTicker({
-          lastPrice: t.last_price || 50000.0,
-          high: t.high_24h || 50200.0,
-          low: t.low_24h || 49800.0,
-          vol: t.volume_24h || 120.5,
-          spread: t.last_price * 0.0002 || 5.0,
-        });
-      }
     } catch (err) {
       console.error('Failed to load portfolio feeds', err);
     }
-  }, [accessToken, symbol]);
+  }, [accessToken]);
 
   const fetchSecurityState = useCallback(async () => {
     if (!accessToken) return;
@@ -486,6 +496,23 @@ export default function Home() {
   };
 
   useEffect(() => {
+    fetchTickerData();
+    const interval = setInterval(fetchTickerData, 5000);
+    return () => clearInterval(interval);
+  }, [fetchTickerData]);
+
+  useEffect(() => {
+    const defaultPrices: { [key: string]: string } = {
+      'BTC-USDT': '60000',
+      'ETH-USDT': '3200',
+      'SOL-USDT': '150',
+      'BNB-USDT': '550',
+      'ADA-USDT': '0.45',
+    };
+    setPrice(defaultPrices[symbol] || '50000');
+  }, [symbol]);
+
+  useEffect(() => {
     if (accessToken) {
       fetchOrders();
       fetchSecurityState();
@@ -498,6 +525,23 @@ export default function Home() {
       return () => clearInterval(interval);
     }
   }, [accessToken, fetchOrders, fetchSecurityState, fetchComplianceState]);
+
+  const calculateTotalUSDT = () => {
+    let total = balances.USDT || 0;
+    const prices: { [key: string]: number } = {
+      BTC: symbol === 'BTC-USDT' ? ticker.lastPrice : 60000.0,
+      ETH: symbol === 'ETH-USDT' ? ticker.lastPrice : 3200.0,
+      SOL: symbol === 'SOL-USDT' ? ticker.lastPrice : 150.0,
+      BNB: symbol === 'BNB-USDT' ? ticker.lastPrice : 550.0,
+      ADA: symbol === 'ADA-USDT' ? ticker.lastPrice : 0.45,
+    };
+    Object.entries(balances).forEach(([asset, val]) => {
+      if (asset === 'USDT') return;
+      const p = prices[asset] || 0.0;
+      total += val * p;
+    });
+    return total;
+  };
 
   const totalCost = parseFloat(price) * parseFloat(quantity);
   const estimatedFees = totalCost * (side === 'BUY' ? 0.002 : 0.001);
@@ -563,8 +607,50 @@ export default function Home() {
 
       {/* 1. Trading Workspace Tab */}
       {activeTab === 'trading' && (
-        <div className="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-4 gap-6 mt-6">
-          {/* Left Column: Order Entry & Account */}
+        <div className="max-w-7xl mx-auto space-y-6 mt-6">
+
+          {/* Advanced Interactive Candlestick Chart & Technical Tools */}
+          <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow-xl">
+            <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 border-b border-slate-800 pb-3 mb-4">
+              <div>
+                <h2 className="text-base font-bold text-cyan-400 flex items-center gap-2">
+                  📈 Interactive Candlestick Chart (TradingView)
+                </h2>
+                <p className="text-xs text-slate-400">
+                  Real-time market tracking with technical indicators, customizable intervals, and professional analytical tools.
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-slate-400 font-semibold">Select Active Market:</span>
+                <select
+                  value={symbol}
+                  onChange={(e) => setSymbol(e.target.value)}
+                  className="px-3 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-xs text-cyan-400 font-bold focus:outline-none focus:border-cyan-500 cursor-pointer"
+                >
+                  <option value="BTC-USDT">BTC-USDT</option>
+                  <option value="ETH-USDT">ETH-USDT</option>
+                  <option value="SOL-USDT">SOL-USDT</option>
+                  <option value="BNB-USDT">BNB-USDT</option>
+                  <option value="ADA-USDT">ADA-USDT</option>
+                </select>
+              </div>
+            </div>
+
+            {/* TradingView Embedded Frame */}
+            <div className="w-full h-[450px] bg-slate-950 rounded-lg overflow-hidden border border-slate-800 relative">
+              <iframe
+                id="tradingview-candlestick-widget"
+                name="tradingview-candlestick-widget"
+                title="TradingView Candlestick Widget"
+                src={`https://s.tradingview.com/widgetembed/?frameElementId=tradingview-candlestick-widget&symbol=BINANCE:${symbol.replace('-', '')}&interval=1&hidesidetoolbar=0&symboledit=1&saveimage=1&toolbarbg=111827&studies=[]&theme=${theme}&style=1&timezone=exchange`}
+                style={{ width: '100%', height: '100%', border: 'none' }}
+                allowFullScreen
+              />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+            {/* Left Column: Order Entry & Account */}
           <section className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-xl flex flex-col justify-between">
             {!accessToken ? (
               <div>
@@ -699,18 +785,22 @@ export default function Home() {
                   <span className="text-right">Total (USDT)</span>
                 </div>
                 <div className="grid grid-cols-3 text-rose-400">
-                  <span>50100.00</span>
-                  <span className="text-right">0.25</span>
-                  <span className="text-right">$12,525</span>
+                  <span>{(ticker.lastPrice + ticker.spread).toFixed(2)}</span>
+                  <span className="text-right">{(0.15 + (ticker.lastPrice % 10) / 100).toFixed(4)}</span>
+                  <span className="text-right">
+                    ${((ticker.lastPrice + ticker.spread) * (0.15 + (ticker.lastPrice % 10) / 100)).toLocaleString('en-US', { maximumFractionDigits: 2 })}
+                  </span>
                 </div>
                 <div className="flex justify-between py-2 border-y border-slate-800 my-2 text-xs font-bold">
                   <span className="text-slate-400">Spread</span>
                   <span className="text-slate-200">${ticker.spread.toFixed(2)} USDT (0.02%)</span>
                 </div>
                 <div className="grid grid-cols-3 text-emerald-400 bg-emerald-950/20">
-                  <span>50000.00</span>
-                  <span className="text-right">0.85</span>
-                  <span className="text-right">$42,500</span>
+                  <span>{ticker.lastPrice.toFixed(2)}</span>
+                  <span className="text-right">{(0.35 + (ticker.lastPrice % 50) / 1000).toFixed(4)}</span>
+                  <span className="text-right">
+                    ${(ticker.lastPrice * (0.35 + (ticker.lastPrice % 50) / 1000)).toLocaleString('en-US', { maximumFractionDigits: 2 })}
+                  </span>
                 </div>
               </div>
             </div>
@@ -724,9 +814,11 @@ export default function Home() {
                   <span className="text-right">Time</span>
                 </div>
                 <div className="grid grid-cols-3 text-emerald-400">
-                  <span>50000.00</span>
-                  <span className="text-right">0.1250</span>
-                  <span className="text-right text-slate-500">12:34:56</span>
+                  <span>{ticker.lastPrice.toFixed(2)}</span>
+                  <span className="text-right">{(0.08 + (ticker.lastPrice % 7) / 500).toFixed(4)}</span>
+                  <span className="text-right text-slate-500">
+                    {new Date(Date.now() - 2000).toTimeString().split(' ')[0]}
+                  </span>
                 </div>
               </div>
             </div>
@@ -739,20 +831,76 @@ export default function Home() {
               <div className="space-y-4">
                 <div className="bg-slate-950 p-3 rounded-lg border border-slate-800/60">
                   <span className="block text-[10px] text-slate-500 font-medium">Estimated Balance Sheet (USDT)</span>
-                  <span className="block text-lg font-bold text-slate-200 mt-1">${(balances.USDT + balances.BTC * ticker.lastPrice + balances.ETH * 3000).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDT</span>
+                  <span className="block text-lg font-bold text-slate-200 mt-1">${calculateTotalUSDT().toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDT</span>
                 </div>
                 <div className="grid grid-cols-3 gap-2 mt-3 text-xs">
                   <div className="bg-slate-950/60 p-2 rounded border border-slate-800">
                     <span className="block text-slate-500 text-[10px]">USDT</span>
-                    <span className="font-bold text-slate-200 font-mono">${balances.USDT.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                    <span className="font-bold text-slate-200 font-mono">${(balances.USDT || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                   </div>
                   <div className="bg-slate-950/60 p-2 rounded border border-slate-800">
                     <span className="block text-slate-500 text-[10px]">BTC</span>
-                    <span className="font-bold text-slate-200 font-mono">{balances.BTC.toFixed(4)}</span>
+                    <span className="font-bold text-slate-200 font-mono">{(balances.BTC || 0).toFixed(4)}</span>
                   </div>
                   <div className="bg-slate-950/60 p-2 rounded border border-slate-800">
                     <span className="block text-slate-500 text-[10px]">ETH</span>
-                    <span className="font-bold text-slate-200 font-mono">{balances.ETH.toFixed(4)}</span>
+                    <span className="font-bold text-slate-200 font-mono">{(balances.ETH || 0).toFixed(4)}</span>
+                  </div>
+                </div>
+
+                {/* Dynamically list any other assets with non-zero balances */}
+                <div className="grid grid-cols-3 gap-2 mt-2 text-xs">
+                  {Object.entries(balances).map(([asset, val]) => {
+                    if (['USDT', 'BTC', 'ETH'].includes(asset) || val === 0) return null;
+                    return (
+                      <div key={asset} className="bg-slate-950/60 p-2 rounded border border-slate-800">
+                        <span className="block text-slate-500 text-[10px]">{asset}</span>
+                        <span className="font-bold text-slate-200 font-mono">{val.toFixed(4)}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Demo Exchange Faucet Block */}
+                <div className="mt-4 border-t border-slate-800/60 pt-3">
+                  <span className="block text-[10px] text-slate-500 uppercase font-bold mb-2">⚡ Custom Demo Faucet</span>
+                  <div className="space-y-2">
+                    <div className="flex gap-2">
+                      <select
+                        value={faucetAsset}
+                        onChange={(e) => setFaucetAsset(e.target.value)}
+                        className="px-2 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-xs text-cyan-400 font-bold focus:outline-none focus:border-cyan-500 cursor-pointer"
+                      >
+                        <option value="USDT">USDT</option>
+                        <option value="BTC">BTC</option>
+                        <option value="ETH">ETH</option>
+                        <option value="SOL">SOL</option>
+                        <option value="BNB">BNB</option>
+                        <option value="ADA">ADA</option>
+                      </select>
+                      <input
+                        type="number"
+                        step="0.0001"
+                        value={faucetAmount}
+                        onChange={(e) => setFaucetAmount(e.target.value)}
+                        className="flex-1 min-w-0 px-2 py-1 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-200 focus:border-cyan-500 focus:outline-none font-mono"
+                        placeholder="Amount"
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        if (!faucetAmount || parseFloat(faucetAmount) <= 0) return;
+                        try {
+                          await api.post('/wallet/deposits/mock', { asset: faucetAsset, amount: parseFloat(faucetAmount) });
+                          const balRes = await api.get('/wallet/balances');
+                          if (balRes.data && balRes.data.balances) setBalances(balRes.data.balances);
+                        } catch (e) { console.error(e); }
+                      }}
+                      className="w-full py-1.5 bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-xs font-bold rounded-lg transition"
+                    >
+                      Credit Demo Wallet
+                    </button>
                   </div>
                 </div>
               </div>
@@ -772,6 +920,7 @@ export default function Home() {
             </div>
           </section>
         </div>
+      </div>
       )}
 
       {/* 2. Security Control Center Tab */}

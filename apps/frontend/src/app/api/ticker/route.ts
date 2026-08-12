@@ -6,9 +6,12 @@ export async function GET(request: Request) {
   const cleanSymbol = symbol.split('-')[0]; // e.g. BTC or ETH
 
   // Securely retrieve the CoinMarketCap API Key from the environment
-  const cmcKey = process.env.CMC_API_KEY || '4fe2644c28fe4393a139555dd1af7f00';
+  const cmcKey = process.env.CMC_API_KEY;
 
   try {
+    if (!cmcKey) {
+      throw new Error('CMC_API_KEY env variable is not set');
+    }
     const cmcRes = await fetch(
       `https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest?symbol=BTC,ETH`,
       {

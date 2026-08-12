@@ -171,7 +171,7 @@ const api = {
     } else if (url.includes('/apikeys')) {
       responseData = { keys: getState(API_KEYS_KEY, []) };
     } else if (url.includes('/wallet/balances')) {
-      responseData = { balances: getState(BALANCES_KEY, { USDT: 15450.0, BTC: 0.25, ETH: 1.5 }) };
+      responseData = { balances: getState(BALANCES_KEY, { USDT: 15450.0, BTC: 0.25, ETH: 1.5, SOL: 15.0, BNB: 5.0, ADA: 2500.0 }) };
     } else if (url.includes('/oms/open')) {
       const orders = getState(ORDERS_KEY, []);
       responseData = { orders: orders.filter((o: any) => o.status === 'OPEN') };
@@ -323,21 +323,25 @@ const api = {
       setState(ORDERS_KEY, orders);
 
       // Update balance
-      const balances = getState(BALANCES_KEY, {});
+      const baseAsset = symbol ? symbol.split('-')[0] : 'BTC';
+      const balances = getState(BALANCES_KEY, { USDT: 15450.0, BTC: 0.25, ETH: 1.5, SOL: 15.0, BNB: 5.0, ADA: 2500.0 });
+      if (balances[baseAsset] === undefined) {
+        balances[baseAsset] = 0.0;
+      }
       const totalCost = price * quantity;
       if (side === 'BUY') {
         if (balances.USDT >= totalCost) {
           balances.USDT -= totalCost;
-          balances.BTC += quantity;
+          balances[baseAsset] = (balances[baseAsset] || 0.0) + quantity;
         } else {
           throwAxiosError('Insufficient balance to execute buy order', 400);
         }
       } else {
-        if (balances.BTC >= quantity) {
-          balances.BTC -= quantity;
+        if ((balances[baseAsset] || 0.0) >= quantity) {
+          balances[baseAsset] = (balances[baseAsset] || 0.0) - quantity;
           balances.USDT += totalCost;
         } else {
-          throwAxiosError('Insufficient asset balance to execute sell order', 400);
+          throwAxiosError(`Insufficient ${baseAsset} balance to execute sell order`, 400);
         }
       }
       setState(BALANCES_KEY, balances);
