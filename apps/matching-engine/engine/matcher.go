@@ -43,6 +43,13 @@ func (m *Matcher) SetSTPMode(mode STPMode) {
 	m.STPMode = mode
 }
 
+// GetLastPrice returns the last matched price thread-safely
+func (m *Matcher) GetLastPrice() float64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.LastPrice
+}
+
 // MatchOrder matches incoming buy/sell orders and outputs executions (Price-Time Priority)
 func (m *Matcher) MatchOrder(order *types.Order) []*types.Trade {
 	m.mu.Lock()
