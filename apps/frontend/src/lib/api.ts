@@ -179,14 +179,35 @@ const api = {
       const orders = getState(ORDERS_KEY, []);
       responseData = { orders: orders.filter((o: any) => o.status !== 'OPEN') };
     } else if (url.includes('/oms/trades')) {
-      responseData = {
-        ticker: {
-          last_price: 50000.0 + (Math.random() - 0.5) * 100,
-          high_24h: 50200.0,
-          low_24h: 49800.0,
-          volume_24h: 120.5
+      const symbolParam = url.includes('symbol=') ? url.split('symbol=')[1].split('&')[0] : 'BTC-USDT';
+      try {
+        const fetchRes = await fetch(`/api/ticker?symbol=${symbolParam}`);
+        if (fetchRes.ok) {
+          const t = await fetchRes.json();
+          responseData = {
+            ticker: {
+              last_price: t.last_price,
+              high_24h: t.high_24h,
+              low_24h: t.low_24h,
+              volume_24h: t.volume_24h
+            }
+          };
+        } else {
+          throw new Error('Server-side ticker route returned non-OK status');
         }
-      };
+      } catch (err) {
+        console.warn('Failed to call local ticker API, using simulation fallback', err);
+        const cleanSymbol = symbolParam.split('-')[0].toUpperCase();
+        const basePrice = cleanSymbol === 'ETH' ? 3120.0 : 59200.0;
+        responseData = {
+          ticker: {
+            last_price: basePrice + (Math.random() - 0.5) * 10,
+            high_24h: basePrice * 1.02,
+            low_24h: basePrice * 0.98,
+            volume_24h: 120.5
+          }
+        };
+      }
     } else if (url.includes('/compliance/kyc/status')) {
       responseData = getState(KYC_KEY, {});
     } else if (url.includes('/compliance/restrictions')) {
