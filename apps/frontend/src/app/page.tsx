@@ -239,6 +239,10 @@ export default function Home() {
     }
   };
 
+  // Real-time Order Book and executions state loaded from Binance Market Maker stream
+  const [binanceDepth, setBinanceDepth] = useState<{ bids: [string, string][]; asks: [string, string][] }>({ bids: [], asks: [] });
+  const [binanceTrades, setBinanceTrades] = useState<{ price: string; qty: string; time: string; isBuyerMaker: boolean }[]>([]);
+
   const fetchTickerData = useCallback(async () => {
     try {
       const tradesRes = await api.get(`/oms/trades?symbol=${symbol}`);
@@ -252,6 +256,36 @@ export default function Home() {
           spread: t.last_price * 0.0002 || 5.0,
         });
       }
+
+      // Fetch live order book depth from public Binance API to feed the market-maker order book
+      const binanceSymbol = symbol.replace('-', '');
+      const depthRes = await fetch(`https://api.binance.com/api/v3/depth?symbol=${binanceSymbol}&limit=10`);
+      if (depthRes.ok) {
+        const dData = await depthRes.json();
+        if (dData && dData.bids && dData.asks) {
+          setBinanceDepth({
+            bids: dData.bids.slice(0, 5),
+            asks: dData.asks.slice(0, 5),
+          });
+        }
+      }
+
+      // Fetch live public execution trades from Binance API
+      const tradesFeedRes = await fetch(`https://api.binance.com/api/v3/trades?symbol=${binanceSymbol}&limit=10`);
+      if (tradesFeedRes.ok) {
+        const tData = await tradesFeedRes.json();
+        if (Array.isArray(tData)) {
+          setBinanceTrades(
+            tData.map((tr: any) => ({
+              price: tr.price,
+              qty: tr.qty,
+              time: new Date(tr.time).toTimeString().split(' ')[0],
+              isBuyerMaker: tr.isBuyerMaker,
+            }))
+          );
+        }
+      }
+
     } catch (err) {
       console.error('Failed to load ticker feed', err);
     }
@@ -777,31 +811,66 @@ export default function Home() {
           {/* Center Panels: Order Book & Recent Public Trades */}
           <section className="lg:col-span-2 grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow-lg flex flex-col justify-between">
-              <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Live Level 2 Order Book</h3>
+              <div className="flex justify-between items-center mb-2">
+                <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Live Level 2 Order Book</h3>
+                <span className="text-[10px] text-emerald-400 font-bold bg-emerald-950/60 px-1.5 py-0.5 rounded border border-emerald-900">Binance Market Maker Feed</span>
+              </div>
               <div className="space-y-1 font-mono text-xs">
                 <div className="grid grid-cols-3 text-slate-500 font-semibold mb-2 border-b border-slate-800 pb-1">
                   <span>Price (USDT)</span>
                   <span className="text-right">Size</span>
                   <span className="text-right">Total (USDT)</span>
                 </div>
-                <div className="grid grid-cols-3 text-rose-400">
-                  <span>{(ticker.lastPrice + ticker.spread).toFixed(2)}</span>
-                  <span className="text-right">{(0.15 + (ticker.lastPrice % 10) / 100).toFixed(4)}</span>
-                  <span className="text-right">
-                    ${((ticker.lastPrice + ticker.spread) * (0.15 + (ticker.lastPrice % 10) / 100)).toLocaleString('en-US', { maximumFractionDigits: 2 })}
-                  </span>
-                </div>
+                {/* Asks (Sell Orders) */}
+                {binanceDepth.asks.length > 0 ? (
+                  binanceDepth.asks.map(([p, q], idx) => {
+                    const priceVal = parseFloat(p);
+                    const qtyVal = parseFloat(q);
+                    return (
+                      <div key={`ask-${idx}`} className="grid grid-cols-3 text-rose-400">
+                        <span>{priceVal.toFixed(2)}</span>
+                        <span className="text-right">{qtyVal.toFixed(4)}</span>
+                        <span className="text-right">${(priceVal * qtyVal).toLocaleString('en-US', { maximumFractionDigits: 2 })}</span>
+                      </div>
+                    );
+                  })
+                ) : (
+                  <div className="grid grid-cols-3 text-rose-400">
+                    <span>{(ticker.lastPrice + ticker.spread).toFixed(2)}</span>
+                    <span className="text-right">{(0.15 + (ticker.lastPrice % 10) / 100).toFixed(4)}</span>
+                    <span className="text-right">
+                      ${((ticker.lastPrice + ticker.spread) * (0.15 + (ticker.lastPrice % 10) / 100)).toLocaleString('en-US', { maximumFractionDigits: 2 })}
+                    </span>
+                  </div>
+                )}
+
                 <div className="flex justify-between py-2 border-y border-slate-800 my-2 text-xs font-bold">
                   <span className="text-slate-400">Spread</span>
                   <span className="text-slate-200">${ticker.spread.toFixed(2)} USDT (0.02%)</span>
                 </div>
-                <div className="grid grid-cols-3 text-emerald-400 bg-emerald-950/20">
-                  <span>{ticker.lastPrice.toFixed(2)}</span>
-                  <span className="text-right">{(0.35 + (ticker.lastPrice % 50) / 1000).toFixed(4)}</span>
-                  <span className="text-right">
-                    ${(ticker.lastPrice * (0.35 + (ticker.lastPrice % 50) / 1000)).toLocaleString('en-US', { maximumFractionDigits: 2 })}
-                  </span>
-                </div>
+
+                {/* Bids (Buy Orders) */}
+                {binanceDepth.bids.length > 0 ? (
+                  binanceDepth.bids.map(([p, q], idx) => {
+                    const priceVal = parseFloat(p);
+                    const qtyVal = parseFloat(q);
+                    return (
+                      <div key={`bid-${idx}`} className="grid grid-cols-3 text-emerald-400 bg-emerald-950/10">
+                        <span>{priceVal.toFixed(2)}</span>
+                        <span className="text-right">{qtyVal.toFixed(4)}</span>
+                        <span className="text-right">${(priceVal * qtyVal).toLocaleString('en-US', { maximumFractionDigits: 2 })}</span>
+                      </div>
+                    );
+                  })
+                ) : (
+                  <div className="grid grid-cols-3 text-emerald-400 bg-emerald-950/20">
+                    <span>{ticker.lastPrice.toFixed(2)}</span>
+                    <span className="text-right">{(0.35 + (ticker.lastPrice % 50) / 1000).toFixed(4)}</span>
+                    <span className="text-right">
+                      ${(ticker.lastPrice * (0.35 + (ticker.lastPrice % 50) / 1000)).toLocaleString('en-US', { maximumFractionDigits: 2 })}
+                    </span>
+                  </div>
+                )}
               </div>
             </div>
 
@@ -813,13 +882,23 @@ export default function Home() {
                   <span className="text-right">Size</span>
                   <span className="text-right">Time</span>
                 </div>
-                <div className="grid grid-cols-3 text-emerald-400">
-                  <span>{ticker.lastPrice.toFixed(2)}</span>
-                  <span className="text-right">{(0.08 + (ticker.lastPrice % 7) / 500).toFixed(4)}</span>
-                  <span className="text-right text-slate-500">
-                    {new Date(Date.now() - 2000).toTimeString().split(' ')[0]}
-                  </span>
-                </div>
+                {binanceTrades.length > 0 ? (
+                  binanceTrades.map((tr, idx) => (
+                    <div key={`trade-${idx}`} className={`grid grid-cols-3 ${tr.isBuyerMaker ? 'text-rose-400' : 'text-emerald-400'}`}>
+                      <span>{parseFloat(tr.price).toFixed(2)}</span>
+                      <span className="text-right">{parseFloat(tr.qty).toFixed(4)}</span>
+                      <span className="text-right text-slate-500">{tr.time}</span>
+                    </div>
+                  ))
+                ) : (
+                  <div className="grid grid-cols-3 text-emerald-400">
+                    <span>{ticker.lastPrice.toFixed(2)}</span>
+                    <span className="text-right">{(0.08 + (ticker.lastPrice % 7) / 500).toFixed(4)}</span>
+                    <span className="text-right text-slate-500">
+                      {new Date(Date.now() - 2000).toTimeString().split(' ')[0]}
+                    </span>
+                  </div>
+                )}
               </div>
             </div>
           </section>

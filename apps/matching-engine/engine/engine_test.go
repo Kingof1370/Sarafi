@@ -606,13 +606,19 @@ func TestFeeEngineReferrals(t *testing.T) {
 
 	// Process trade match commissions split
 	ref, commission, revenue := fe.ProcessCommission(userID, "USDT", 100.0)
-	if ref != referrerID || commission != 20.0 || revenue != 80.0 {
+	// Deducts SAFU first (10% of 100.0 = 10.0), remaining = 90.0
+	// 20% of remaining 90.0 = 18.0 commission, revenue = 72.0
+	if ref != referrerID || commission != 18.0 || revenue != 72.0 {
 		t.Errorf("Referral commission split mismatch: ref %s, commission %f, revenue %f", ref, commission, revenue)
 	}
 
 	// Collected platform revenue check
-	if fe.GetAccumulatedRevenue("USDT") != 80.0 {
-		t.Errorf("Expected USDT accumulated platform revenue to be 80.0, got %f", fe.GetAccumulatedRevenue("USDT"))
+	if fe.GetAccumulatedRevenue("USDT") != 72.0 {
+		t.Errorf("Expected USDT accumulated platform revenue to be 72.0, got %f", fe.GetAccumulatedRevenue("USDT"))
+	}
+
+	if fe.GetSAFUReserve("USDT") != 10.0 {
+		t.Errorf("Expected USDT SAFU reserve to be 10.0, got %f", fe.GetSAFUReserve("USDT"))
 	}
 }
 
