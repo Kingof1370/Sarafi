@@ -3,8 +3,6 @@ package security
 import (
 	"bytes"
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
@@ -18,8 +16,9 @@ import (
 
 // BackupRestoreEngine manages secure PostgreSQL backups and isolated test restores.
 type BackupRestoreEngine struct {
-	db         *database.DB
-	encryptionKey []byte // Loaded from env or config
+	db            *database.DB
+	encryptionKey []byte      // Loaded from env or config
+	km            *KeyManager // Optional KeyManager for Envelope Encrypted Backups
 }
 
 // getPGCommand builds an executable command using configurable container name or native binary
@@ -71,12 +70,23 @@ func NewBackupRestoreEngine(db *database.DB, hexOrPlainKey string) (*BackupResto
 	}
 
 	return &BackupRestoreEngine{
-		db:         db,
+		db:            db,
 		encryptionKey: key,
 	}, nil
 }
 
-// CreateEncryptedBackup runs pg_dump, encrypts the output with AES-256-GCM, and returns the encrypted bytes and/or file.
+// SetKeyManager sets the KeyManager to enable Envelope Encrypted database backups
+func (bre *BackupRestoreEngine) SetKeyManager(km *KeyManager) {
+	bre.km = km
+}
+
+// EnvelopeEncryptedBackup represents a DB backup structure utilizing Envelope Encryption
+type EnvelopeEncryptedBackup struct {
+	EncryptedData []byte `json:"encrypted_data"` // Compressed SQL dump encrypted with backup DEK
+	EncryptedDEK  []byte `json:"encrypted_dek"`  // DEK encrypted with KMS KEK
+}
+
+// CreateEncryptedBackup runs pg_dump, encrypts the output with AES-256-GCM (using Envelope Encryption if KeyManager is configured), and returns the encrypted bytes and/or file.
 func (bre *BackupRestoreEngine) CreateEncryptedBackup(ctx context.Context, host, user, password, dbName string, port int) ([]byte, string, error) {
 	// 1. Run pg_dump via configurable command builder
 	args := []string{"-U", user, "-d", dbName, "--clean", "--no-owner"}
@@ -104,29 +114,53 @@ func (bre *BackupRestoreEngine) CreateEncryptedBackup(ctx context.Context, host,
 		return nil, "", fmt.Errorf("pg_dump returned empty backup data")
 	}
 
-	// 2. Encrypt using AES-256-GCM
-	block, err := aes.NewCipher(bre.encryptionKey)
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to create cipher: %w", err)
-	}
+	var finalBackupBytes []byte
 
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to create GCM: %w", err)
-	}
+	// Check if KeyManager is registered for Envelope Encryption
+	if bre.km != nil {
+		// Generate unique secure random DEK for this backup
+		backupDEK := make([]byte, 32)
+		if _, err := io.ReadFull(rand.Reader, backupDEK); err != nil {
+			return nil, "", fmt.Errorf("failed to generate random backup DEK: %w", err)
+		}
+		defer ZeroMemory(backupDEK)
 
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return nil, "", fmt.Errorf("failed to read nonce: %w", err)
-	}
+		// Encrypt plaintext backup dump with backup DEK
+		encSQL, err := aesGCMEncrypt(backupDEK, plainData)
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to encrypt backup with DEK: %w", err)
+		}
 
-	encryptedData := gcm.Seal(nonce, nonce, plainData, nil)
+		// Encrypt backup DEK with KEK via KMS
+		encDEK, err := bre.km.KMS.Encrypt(ctx, backupDEK)
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to encrypt backup DEK with KEK: %w", err)
+		}
+
+		envelope := EnvelopeEncryptedBackup{
+			EncryptedData: encSQL,
+			EncryptedDEK:  encDEK,
+		}
+
+		serialized, err := json.Marshal(envelope)
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to serialize envelope backup: %w", err)
+		}
+		finalBackupBytes = serialized
+	} else {
+		// Classic encryption fallback
+		encryptedData, err := aesGCMEncrypt(bre.encryptionKey, plainData)
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to encrypt backup: %w", err)
+		}
+		finalBackupBytes = encryptedData
+	}
 
 	// Write encrypted backup file
 	id := fmt.Sprintf("bk_db_%d", time.Now().UnixNano())
 	filepath := fmt.Sprintf("/tmp/velyxora_encrypted_backup_%s.enc", id)
 
-	err = os.WriteFile(filepath, encryptedData, 0600)
+	err = os.WriteFile(filepath, finalBackupBytes, 0600)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to write encrypted backup to file: %w", err)
 	}
@@ -138,7 +172,7 @@ func (bre *BackupRestoreEngine) CreateEncryptedBackup(ctx context.Context, host,
 			id, "DATABASE", "COMPLETED", filepath)
 	}
 
-	return encryptedData, filepath, nil
+	return finalBackupBytes, filepath, nil
 }
 
 // DecryptAndVerifyBackup decrypts the backup file and verifies integrity and content (unencrypted raw check).
@@ -148,25 +182,35 @@ func (bre *BackupRestoreEngine) DecryptAndVerifyBackup(filepath string) ([]byte,
 		return nil, fmt.Errorf("failed to read backup file: %w", err)
 	}
 
-	block, err := aes.NewCipher(bre.encryptionKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create cipher: %w", err)
-	}
+	var plainData []byte
 
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create GCM: %w", err)
-	}
+	// Check if KeyManager is registered and file contains json envelope backup structure
+	if bre.km != nil && len(encryptedData) > 0 && encryptedData[0] == '{' {
+		var envelope EnvelopeEncryptedBackup
+		if err := json.Unmarshal(encryptedData, &envelope); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal envelope backup: %w", err)
+		}
 
-	nonceSize := gcm.NonceSize()
-	if len(encryptedData) < nonceSize {
-		return nil, fmt.Errorf("ciphertext too short")
-	}
+		// Decrypt backup DEK via KMS KEK
+		backupDEK, err := bre.km.KMS.Decrypt(context.Background(), envelope.EncryptedDEK)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decrypt backup DEK: %w", err)
+		}
+		defer ZeroMemory(backupDEK)
 
-	nonce, ciphertext := encryptedData[:nonceSize], encryptedData[nonceSize:]
-	plainData, err := gcm.Open(nil, nonce, ciphertext, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decrypt backup file (integrity verification failed): %w", err)
+		// Decrypt plaintext SQL dump using decrypted backup DEK
+		decryptedPlain, err := aesGCMDecrypt(backupDEK, envelope.EncryptedData)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decrypt backup with DEK: %w", err)
+		}
+		plainData = decryptedPlain
+	} else {
+		// Classic un-enveloped decryption fallback
+		decrypted, err := aesGCMDecrypt(bre.encryptionKey, encryptedData)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decrypt backup file (integrity verification failed): %w", err)
+		}
+		plainData = decrypted
 	}
 
 	// Verify standard PostgreSQL script markers to confirm valid sql content
