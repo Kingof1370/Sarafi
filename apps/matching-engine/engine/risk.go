@@ -21,7 +21,7 @@ const (
 	STP_Allow        STPMode = "ALLOW"
 )
 
-// RiskEngine manages pre-trade validation, post-trade settlement checks, STP, and abuse blocklists
+// RiskEngine manages pre-trade validation, post-trade settlement checks, STP, abuse blocklists, and Futures risk
 type RiskEngine struct {
 	mu               sync.RWMutex
 	db               *database.DB                  // authoritative database reference
@@ -38,6 +38,13 @@ type RiskEngine struct {
 	priceBandPercentage   float64            // e.g. 0.10 (10% deviation limits)
 	tradingHalted         bool
 	stpMode               STPMode
+
+	// Futures Leverage, Margin, and Liquidation Core
+	positionEngine          *PositionEngine
+	futuresInsuranceFund    map[string]float64
+	userLeverages           map[string]map[string]float64 // userID -> symbol -> leverage
+	OnCancelUserOrders      func(userID, symbol string)
+	OnPlaceLiquidationOrder func(userID, symbol string, bankruptcyPrice, size float64)
 }
 
 // NewRiskEngine creates an upgraded Enterprise Risk and Abuse protection engine
@@ -54,7 +61,55 @@ func NewRiskEngine(minPrice, maxPrice float64) *RiskEngine {
 		priceBandPercentage:   0.10, // Default 10% price band
 		tradingHalted:         false,
 		stpMode:               STP_CancelNewest,
+		futuresInsuranceFund:  make(map[string]float64),
+		userLeverages:         make(map[string]map[string]float64),
 	}
+}
+
+// SetUserLeverage sets leverage for a specific user and symbol
+func (re *RiskEngine) SetUserLeverage(userID, symbol string, leverage float64) {
+	re.mu.Lock()
+	defer re.mu.Unlock()
+	if re.userLeverages == nil {
+		re.userLeverages = make(map[string]map[string]float64)
+	}
+	if _, ok := re.userLeverages[userID]; !ok {
+		re.userLeverages[userID] = make(map[string]float64)
+	}
+	re.userLeverages[userID][symbol] = leverage
+}
+
+// GetUserLeverage retrieves leverage for a specific user and symbol (defaults to 20.0)
+func (re *RiskEngine) GetUserLeverage(userID, symbol string) float64 {
+	re.mu.RLock()
+	defer re.mu.RUnlock()
+	if re.userLeverages == nil {
+		return 20.0
+	}
+	uLev, ok := re.userLeverages[userID]
+	if !ok {
+		return 20.0
+	}
+	lev, ok := uLev[symbol]
+	if !ok || lev <= 0 {
+		return 20.0
+	}
+	return lev
+}
+
+// SetPositionEngine registers the PositionEngine reference for real-time portfolio checking
+func (re *RiskEngine) SetPositionEngine(pe *PositionEngine) {
+	re.mu.Lock()
+	defer re.mu.Unlock()
+	re.positionEngine = pe
+}
+
+// SetForceLiquidationCallbacks registers the actions to cancel open orders and place liquidation orders
+func (re *RiskEngine) SetForceLiquidationCallbacks(cancel func(string, string), place func(string, string, float64, float64)) {
+	re.mu.Lock()
+	defer re.mu.Unlock()
+	re.OnCancelUserOrders = cancel
+	re.OnPlaceLiquidationOrder = place
 }
 
 // SetSTPMode configures the Self-Trade Prevention policy
@@ -120,11 +175,97 @@ func (re *RiskEngine) SuspendMarket(symbol string, suspended bool) {
 	}
 }
 
-// SetReferencePrice registers price feeds for band protections
+// SetReferencePrice registers price feeds for band protections and triggers real-time futures risk evaluation
 func (re *RiskEngine) SetReferencePrice(symbol string, price float64) {
 	re.mu.Lock()
-	defer re.mu.Unlock()
 	re.marketReferencePrices[symbol] = price
+	pe := re.positionEngine
+	re.mu.Unlock()
+
+	if pe != nil {
+		re.EvaluatePositionsRisk(symbol, price)
+	}
+}
+
+// EvaluatePositionsRisk monitors all users' open position margin ratio against maintenance margin requirements
+func (re *RiskEngine) EvaluatePositionsRisk(symbol string, markPrice float64) {
+	if re.positionEngine == nil {
+		return
+	}
+
+	positionsMap := re.positionEngine.GetPositionsMap()
+	for uID, symMap := range positionsMap {
+		pos, exists := symMap[symbol]
+		if !exists || pos.Size == 0 {
+			continue
+		}
+
+		marginRatio := pos.CalculateMarginRatio(markPrice)
+		if marginRatio >= 1.0 {
+			re.ForceLiquidate(uID, symbol, pos, markPrice)
+		}
+	}
+}
+
+// ForceLiquidate takes over the user's position, cancels open orders, and submits a liquidation order
+func (re *RiskEngine) ForceLiquidate(userID, symbol string, pos *Position, markPrice float64) {
+	// 1. Cancel all open orders for that user on that symbol
+	if re.OnCancelUserOrders != nil {
+		re.OnCancelUserOrders(userID, symbol)
+	}
+
+	// Calculate Bankruptcy Price and take over position (reset user's exposure)
+	bankruptcyPrice := pos.CalculateBankruptcyPrice()
+	size := pos.Size
+
+	// Thread-safely reset position inside PositionEngine to prevent data races
+	if re.positionEngine != nil {
+		re.positionEngine.ResetPosition(userID, symbol)
+	}
+
+	// 2. Place a liquidation limit order at the Bankruptcy Price on the order book
+	if re.OnPlaceLiquidationOrder != nil {
+		re.OnPlaceLiquidationOrder(userID, symbol, bankruptcyPrice, size)
+	}
+}
+
+// AddInsuranceFundReserves credits or debits the futures insurance fund
+func (re *RiskEngine) AddInsuranceFundReserves(ctx context.Context, asset string, amount float64) error {
+	re.mu.Lock()
+	if re.futuresInsuranceFund == nil {
+		re.futuresInsuranceFund = make(map[string]float64)
+	}
+	re.futuresInsuranceFund[asset] += amount
+	db := re.db
+	re.mu.Unlock()
+
+	if db != nil {
+		_, err := db.Pool.Exec(ctx,
+			`INSERT INTO futures_insurance_funds (asset, balance, updated_at) VALUES ($1, $2, NOW())
+			 ON CONFLICT (asset) DO UPDATE SET balance = futures_insurance_funds.balance + EXCLUDED.balance, updated_at = NOW()`,
+			asset, amount)
+		return err
+	}
+	return nil
+}
+
+// GetInsuranceFundBalance returns the insurance fund reserve balance
+func (re *RiskEngine) GetInsuranceFundBalance(asset string) float64 {
+	re.mu.RLock()
+	defer re.mu.RUnlock()
+	return re.futuresInsuranceFund[asset]
+}
+
+// TriggerADL initiates an auto-deleveraging process due to loss exceeding insurance funds
+func (re *RiskEngine) TriggerADL(symbol string, loss float64) {
+	if re.db != nil {
+		ctx := context.Background()
+		_, _ = re.db.Pool.Exec(ctx,
+			`INSERT INTO sre_alerts (id, incident_id, metric_name, value, threshold, status, details, created_at, updated_at)
+			 VALUES ($1, NULL, $2, $3, $4, $5, $6, NOW(), NOW())`,
+			fmt.Sprintf("adl_alert_%d", time.Now().UnixNano()),
+			"futures_adl", loss, 0.0, "TRIGGERED", "Auto-Deleveraging sequence initiated due to insurance fund depletion")
+	}
 }
 
 // DepositAsset sets or updates a user balance
@@ -162,6 +303,11 @@ func (re *RiskEngine) GetAvailableBalance(userID, asset string) float64 {
 
 // ValidateOrder performs intensive pre-trade risk and abuse checks
 func (re *RiskEngine) ValidateOrder(order *types.Order, quoteAsset, baseAsset string, feeRate float64) error {
+	// 1. System/Liquidation Engine exemption
+	if order.UserID == "LIQUIDATION_ENGINE" {
+		return nil
+	}
+
 	re.mu.Lock()
 	defer re.mu.Unlock()
 
@@ -241,12 +387,32 @@ func (re *RiskEngine) ValidateOrder(order *types.Order, quoteAsset, baseAsset st
 	// 6. Balance verification and atomic reservation
 	var requiredAmount float64
 	var targetAsset string
-	if order.Side == types.SideBuy {
-		requiredAmount = common.SafeMul(common.SafeMul(order.Quantity, order.Price), common.SafeAdd(1.0, feeRate))
+	isFutures := IsFuturesOrder(string(order.Side), order.Symbol)
+
+	if isFutures {
 		targetAsset = quoteAsset
+		lev := 20.0
+		if uLev, ok := re.userLeverages[order.UserID]; ok {
+			if l, ok := uLev[order.Symbol]; ok && l > 0 {
+				lev = l
+			}
+		}
+
+		sideUpper := strings.ToUpper(string(order.Side))
+		if strings.Contains(sideUpper, "CLOSE") {
+			requiredAmount = 0
+		} else {
+			// Leverage Margin Reservation
+			requiredAmount = common.SafeDiv(common.SafeMul(order.Quantity, order.Price), lev)
+		}
 	} else {
-		requiredAmount = order.Quantity
-		targetAsset = baseAsset
+		if order.Side == types.SideBuy {
+			requiredAmount = common.SafeMul(common.SafeMul(order.Quantity, order.Price), common.SafeAdd(1.0, feeRate))
+			targetAsset = quoteAsset
+		} else {
+			requiredAmount = order.Quantity
+			targetAsset = baseAsset
+		}
 	}
 
 	if re.db != nil {

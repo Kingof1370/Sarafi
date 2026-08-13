@@ -3,11 +3,24 @@ package engine
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 	"velyxora/packages/database"
 	"velyxora/packages/types"
 )
+
+// IsFuturesOrder checks if a given side or symbol is for Perpetual Futures
+func IsFuturesOrder(side string, symbol string) bool {
+	sideUpper := strings.ToUpper(side)
+	if strings.Contains(sideUpper, "OPEN") || strings.Contains(sideUpper, "CLOSE") {
+		return true
+	}
+	if strings.Contains(strings.ToUpper(symbol), "PERP") || strings.Contains(strings.ToUpper(symbol), "FUTURES") {
+		return true
+	}
+	return false
+}
 
 // OMSRouter coordinates validations, risk locks, matching execution, and cancellations
 type OMSRouter struct {
@@ -19,6 +32,7 @@ type OMSRouter struct {
 	execution          *ExecutionEngine
 	settlement         *SettlementEngine
 	liquidityBridge    *LiquidityBridge
+	positionEngine     *PositionEngine
 	OnTradeMatched     func(symbol string, price, quantity float64, timestamp time.Time)
 	OnOrderBookChanged func(symbol string)
 }
@@ -44,6 +58,13 @@ func NewOMSRouter(sm *OMSStateMachine, val *OMSValidator, risk *RiskEngine, matc
 	}
 
 	return router
+}
+
+// SetPositionEngine registers the PositionEngine reference inside the OMSRouter
+func (or *OMSRouter) SetPositionEngine(pe *PositionEngine) {
+	or.mu.Lock()
+	defer or.mu.Unlock()
+	or.positionEngine = pe
 }
 
 // SetLiquidityBridge configures the external liquidity engine bridge
@@ -338,12 +359,76 @@ func (or *OMSRouter) ProcessIncomingOrder(ctx context.Context, order *AdvancedOr
 			or.settlement.QueueSettlement(exec, baseAsset, quoteAsset)
 		}
 
-		// Trigger Trade Callback for Tickers/Candles/WebSockets
+		// Trigger Trade Callback, Position Adjustments and Liquidation Surplus checks
 		for _, t := range allMatches {
+			if or.positionEngine != nil {
+				isFuturesSymbol := strings.Contains(strings.ToUpper(t.Symbol), "PERP") || strings.Contains(strings.ToUpper(t.Symbol), "FUTURES")
+
+				// Update Buyer position
+				if isFuturesSymbol {
+					lev := or.risk.GetUserLeverage(t.BuyerID, t.Symbol)
+					margin := (t.Quantity * t.Price) / lev
+					or.positionEngine.RecordFuturesExecution(t.BuyerID, t.Symbol, t.Quantity, t.Price, lev, margin, 0.05)
+				} else {
+					or.positionEngine.RecordExecution(t.BuyerID, t.Symbol, t.Quantity, t.Price)
+				}
+
+				// Update Seller position
+				if isFuturesSymbol {
+					lev := or.risk.GetUserLeverage(t.SellerID, t.Symbol)
+					margin := (t.Quantity * t.Price) / lev
+					or.positionEngine.RecordFuturesExecution(t.SellerID, t.Symbol, -t.Quantity, t.Price, lev, margin, 0.05)
+				} else {
+					or.positionEngine.RecordExecution(t.SellerID, t.Symbol, -t.Quantity, t.Price)
+				}
+			}
+
+			// Check for liquidation order filled surplus/deficit
+			if t.BuyerID == "LIQUIDATION_ENGINE" || t.SellerID == "LIQUIDATION_ENGINE" {
+				liqOrderID := t.BuyOrderID
+				if t.SellerID == "LIQUIDATION_ENGINE" {
+					liqOrderID = t.SellOrderID
+				}
+
+				liqOrder, err := or.stateMachine.GetOrder(liqOrderID)
+				if err == nil {
+					bankruptcyPrice := liqOrder.Price
+					filledPrice := t.Price
+					qty := t.Quantity
+
+					if t.SellerID == "LIQUIDATION_ENGINE" {
+						// Long liquidation order: SELL order at Bankruptcy Price
+						if filledPrice > bankruptcyPrice {
+							surplus := (filledPrice - bankruptcyPrice) * qty
+							_ = or.risk.AddInsuranceFundReserves(ctx, quoteAsset, surplus)
+						} else if filledPrice < bankruptcyPrice {
+							loss := (bankruptcyPrice - filledPrice) * qty
+							_ = or.risk.AddInsuranceFundReserves(ctx, quoteAsset, -loss)
+							if or.risk.GetInsuranceFundBalance(quoteAsset) < 0 {
+								or.risk.TriggerADL(t.Symbol, loss)
+							}
+						}
+					} else {
+						// Short liquidation order: BUY order at Bankruptcy Price
+						if filledPrice < bankruptcyPrice {
+							surplus := (bankruptcyPrice - filledPrice) * qty
+							_ = or.risk.AddInsuranceFundReserves(ctx, quoteAsset, surplus)
+						} else if filledPrice > bankruptcyPrice {
+							loss := (filledPrice - bankruptcyPrice) * qty
+							_ = or.risk.AddInsuranceFundReserves(ctx, quoteAsset, -loss)
+							if or.risk.GetInsuranceFundBalance(quoteAsset) < 0 {
+								or.risk.TriggerADL(t.Symbol, loss)
+							}
+						}
+					}
+				}
+			}
+
 			if or.OnTradeMatched != nil {
 				or.OnTradeMatched(t.Symbol, t.Price, t.Quantity, t.Timestamp)
 			}
 		}
+
 		// Clear pending jobs queue
 		_, _ = or.settlement.ProcessQueue(ctx)
 
