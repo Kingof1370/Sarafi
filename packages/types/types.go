@@ -270,6 +270,16 @@ type Order struct {
 	PostOnly      bool        `json:"post_only" db:"post_only"`
 	CreatedAt     time.Time   `json:"created_at" db:"created_at"`
 	UpdatedAt     time.Time   `json:"updated_at" db:"updated_at"`
+
+	// Advanced & Algorithmic Fields (Canonical schema mapping alignment)
+	ClientOrderID string      `json:"client_order_id" db:"client_order_id"`
+	ExternalRefID string      `json:"external_reference_id" db:"external_reference_id"`
+	ExecutionID   string      `json:"execution_id" db:"execution_id"`
+	CorrelationID string      `json:"correlation_id" db:"correlation_id"`
+	StopPrice     float64     `json:"stop_price" db:"stop_price"`
+	TrailingDelta float64     `json:"trailing_delta" db:"trailing_delta"`
+	IcebergSize   float64     `json:"iceberg_size" db:"iceberg_size"`
+	ReduceOnly    bool        `json:"reduce_only" db:"reduce_only"`
 }
 
 // Trade represents a execution match between a buyer and seller

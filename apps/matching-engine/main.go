@@ -106,7 +106,7 @@ func main() {
 	}
 
 	omsRouter.OnOrderBookChanged = func(symbol string) {
-		m := omsRouter.GetMatcher()
+		m := omsRouter.GetMatcherForSymbol(symbol)
 		if m != nil {
 			depth := m.GetL2Depth(20)
 			event := types.KafkaEvent{
@@ -168,6 +168,17 @@ func main() {
 				TimeInForce:   engine.TimeInForce(legacyOrder.TimeInForce),
 				CreatedAt:     legacyOrder.CreatedAt,
 				UpdatedAt:     legacyOrder.UpdatedAt,
+
+				// Advanced fields mapping alignment
+				ClientOrderID: legacyOrder.ClientOrderID,
+				ExternalRefID: legacyOrder.ExternalRefID,
+				ExecutionID:   legacyOrder.ExecutionID,
+				CorrelationID: legacyOrder.CorrelationID,
+				StopPrice:     legacyOrder.StopPrice,
+				TrailingDelta: legacyOrder.TrailingDelta,
+				IcebergSize:   legacyOrder.IcebergSize,
+				PostOnly:      legacyOrder.PostOnly,
+				ReduceOnly:    legacyOrder.ReduceOnly,
 			}
 			if order.TimeInForce == "" {
 				order.TimeInForce = engine.TIF_GTC

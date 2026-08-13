@@ -28,7 +28,8 @@ type OMSRouter struct {
 	stateMachine       *OMSStateMachine
 	validator          *OMSValidator
 	risk               *RiskEngine
-	matcher            *Matcher
+	matcher            *Matcher // Deprecated: use registry instead
+	registry           *MarketRegistry
 	execution          *ExecutionEngine
 	settlement         *SettlementEngine
 	liquidityBridge    *LiquidityBridge
@@ -39,25 +40,44 @@ type OMSRouter struct {
 
 // NewOMSRouter initializes the routing supervisor
 func NewOMSRouter(sm *OMSStateMachine, val *OMSValidator, risk *RiskEngine, matcher *Matcher, exec *ExecutionEngine, settle *SettlementEngine) *OMSRouter {
+	registry := NewMarketRegistry()
+	if matcher != nil {
+		registry.RegisterMatcher(matcher.Symbol, matcher)
+	}
+
 	router := &OMSRouter{
 		stateMachine: sm,
 		validator:    val,
 		risk:         risk,
 		matcher:      matcher,
+		registry:     registry,
 		execution:    exec,
 		settlement:   settle,
 	}
 
 	if val != nil {
 		val.GetLastPrice = func(symbol string) float64 {
-			if matcher != nil && matcher.Symbol == symbol {
-				return matcher.GetLastPrice()
+			if registry != nil {
+				m := registry.GetMatcher(symbol)
+				if m != nil {
+					return m.GetLastPrice()
+				}
 			}
 			return 0
 		}
 	}
 
 	return router
+}
+
+// GetMatcherForSymbol retrieves the isolated Matcher instance for a given symbol
+func (or *OMSRouter) GetMatcherForSymbol(symbol string) *Matcher {
+	return or.registry.GetMatcher(symbol)
+}
+
+// GetMarketRegistry returns the internal multi-symbol registry
+func (or *OMSRouter) GetMarketRegistry() *MarketRegistry {
+	return or.registry
 }
 
 // SetPositionEngine registers the PositionEngine reference inside the OMSRouter
@@ -76,12 +96,23 @@ func (or *OMSRouter) SetLiquidityBridge(lb *LiquidityBridge) {
 
 // GetAggregatedL2Depth merges the local Matcher book depth with external real-time liquidity
 func (or *OMSRouter) GetAggregatedL2Depth(maxLevels int) *types.OrderBookL2 {
+	sym := "BTC-USDT"
+	if or.matcher != nil {
+		sym = or.matcher.Symbol
+	}
+	return or.GetAggregatedL2DepthForSymbol(sym, maxLevels)
+}
+
+// GetAggregatedL2DepthForSymbol merges the local Matcher book depth for a specific symbol with external real-time liquidity
+func (or *OMSRouter) GetAggregatedL2DepthForSymbol(symbol string, maxLevels int) *types.OrderBookL2 {
 	or.mu.RLock()
 	lb := or.liquidityBridge
 	or.mu.RUnlock()
 
+	m := or.registry.GetMatcher(symbol)
+
 	// 1. Retrieve local book depth
-	localL2 := or.matcher.GetL2Depth(maxLevels)
+	localL2 := m.GetL2Depth(maxLevels)
 	for i := range localL2.Bids {
 		localL2.Bids[i].IsAggregated = false
 		localL2.Bids[i].Source = "Local"
@@ -96,7 +127,7 @@ func (or *OMSRouter) GetAggregatedL2Depth(maxLevels int) *types.OrderBookL2 {
 	}
 
 	// 2. Retrieve external book depth
-	extL2, err := lb.GetOrderBook(or.matcher.Symbol)
+	extL2, err := lb.GetOrderBook(symbol)
 	if err != nil {
 		// Degradation: Fallback to only local depth
 		return localL2
@@ -169,7 +200,7 @@ func (or *OMSRouter) GetAggregatedL2Depth(maxLevels int) *types.OrderBookL2 {
 	}
 
 	return &types.OrderBookL2{
-		Symbol:    or.matcher.Symbol,
+		Symbol:    symbol,
 		Bids:      mergedBids,
 		Asks:      mergedAsks,
 		Sequence:  localL2.Sequence,
@@ -229,6 +260,8 @@ func (or *OMSRouter) ProcessIncomingOrder(ctx context.Context, order *AdvancedOr
 	// 6. Route to Matching Engine Core
 	isStop := (order.Type == "STOP" || order.Type == "STOP_LIMIT" || order.Type == "TAKE_PROFIT" || order.Type == "TAKE_PROFIT_LIMIT")
 
+	m := or.registry.GetMatcher(order.Symbol)
+
 	if isStop {
 		triggerPrice := order.StopPrice
 		if triggerPrice == 0 {
@@ -236,7 +269,7 @@ func (or *OMSRouter) ProcessIncomingOrder(ctx context.Context, order *AdvancedOr
 		}
 		legacyOrder.Price = triggerPrice
 
-		or.matcher.AddStopOrder(legacyOrder)
+		m.AddStopOrder(legacyOrder)
 		_, _ = or.stateMachine.TransitionOrder(order.ID, StatusOMS_Queued, "QUEUE", ip, device, "Registered stop order trigger")
 		if or.OnOrderBookChanged != nil {
 			or.OnOrderBookChanged(order.Symbol)
@@ -246,7 +279,7 @@ func (or *OMSRouter) ProcessIncomingOrder(ctx context.Context, order *AdvancedOr
 
 	_, _ = or.stateMachine.TransitionOrder(order.ID, StatusOMS_Queued, "QUEUE", ip, device, "Queued inside the limit book")
 
-	matches := or.matcher.MatchOrder(legacyOrder)
+	matches := m.MatchOrder(legacyOrder)
 
 	var externalMatches []*types.Trade
 	or.mu.RLock()
@@ -266,7 +299,7 @@ func (or *OMSRouter) ProcessIncomingOrder(ctx context.Context, order *AdvancedOr
 
 			if len(extLevels) > 0 {
 				// Remove order temporarily from local matcher book to prevent double match during calculation
-				or.matcher.CancelOrder(legacyOrder.ID)
+				m.CancelOrder(legacyOrder.ID)
 
 				for i := 0; i < len(extLevels) && legacyOrder.FilledQty < legacyOrder.Quantity; i++ {
 					level := extLevels[i]
@@ -342,7 +375,7 @@ func (or *OMSRouter) ProcessIncomingOrder(ctx context.Context, order *AdvancedOr
 
 				// If still not fully filled and is a Limit order, add back to local book
 				if legacyOrder.FilledQty < legacyOrder.Quantity && legacyOrder.Type == types.TypeLimit {
-					or.matcher.AddOrderToBookDirect(legacyOrder)
+					m.AddOrderToBookDirect(legacyOrder)
 				}
 			}
 		}
@@ -473,8 +506,10 @@ func (or *OMSRouter) CancelOrder(orderID, ip, device string) error {
 		return err
 	}
 
+	m := or.registry.GetMatcher(order.Symbol)
+
 	// Attempt cancellation on Matcher book levels
-	cancelled := or.matcher.CancelOrder(orderID)
+	cancelled := m.CancelOrder(orderID)
 	if !cancelled {
 		return fmt.Errorf("order %s was not found active in matcher price queues", orderID)
 	}

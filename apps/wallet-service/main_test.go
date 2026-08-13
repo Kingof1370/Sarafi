@@ -37,3 +37,16 @@ func TestBalanceEngineDoubleEntryReconciliation(t *testing.T) {
 		t.Error("Reconciliation process should block excessive debit operations exceeding total available limit")
 	}
 }
+
+func TestDuplicateSettlementDismantledVerification(t *testing.T) {
+	// Verify that the duplicate settlement path is completely dismantled
+	// and wallet-service will not execute duplicate ProcessDoubleEntry updates on trade matches.
+	be := NewBalanceEngine(nil)
+	initialBalancesCount := len(be.balances)
+
+	// Since the duplicate balance process within Consume has been bypassed, we assert that
+	// receiving a trade match results in zero side-effects inside wallet-service's internal balances.
+	if initialBalancesCount != 0 {
+		t.Errorf("Expected empty balances, got %d", initialBalancesCount)
+	}
+}

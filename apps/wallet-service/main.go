@@ -223,6 +223,7 @@ func main() {
 	}
 
 	be := NewBalanceEngine(db)
+	_ = be // balance engine remains initialized for isolated or administrative balance reconciliation tasks
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -260,38 +261,11 @@ func main() {
 				return err
 			}
 
-			log.Info("Settling Trade via Ledger Engine", "trade_id", trade.ID, "buyer_id", trade.BuyerID, "seller_id", trade.SellerID, "price", trade.Price, "qty", trade.Quantity)
+			// DISMANTLED DUPLICATE SETTLEMENT PATH (Resolved Issue 3)
+			// Settle processes are canonically managed by SettlementEngine inside matching-engine transaction boundaries.
+			log.Info("Trade received. Skipping duplicate wallet-service ledger settlement (Canonically settled by Matching Engine SettlementEngine)", "trade_id", trade.ID)
 
-			baseAsset := strings.Split(trade.Symbol, "-")[0]  // e.g. "BTC"
-			quoteAsset := strings.Split(trade.Symbol, "-")[1] // e.g. "USDT"
-			quoteAmount := trade.Price * trade.Quantity
-
-			om := common.GetObservabilityManager()
-			om.WalletOpsTotal.WithLabelValues("settlement", baseAsset).Inc()
-			om.WalletOpsTotal.WithLabelValues("settlement", quoteAsset).Inc()
-
-			// Settle Buyer Debit (USDT) -> Credit Seller (USDT)
-			txID := "tx_ld_" + fmt.Sprintf("%d", time.Now().UnixNano())
-			startQuote := time.Now()
-			err = be.ProcessDoubleEntry(ctx, txID, trade.BuyerID, trade.SellerID, quoteAsset, quoteAmount, fmt.Sprintf("Settled trade purchase: %s", trade.ID))
-			om.PostgresLatencySeconds.WithLabelValues("tx").Observe(time.Since(startQuote).Seconds())
-			if err != nil {
-				om.PostgresErrorsTotal.WithLabelValues("tx", "settle_quote_error").Inc()
-				log.Error("Failed to settle Quote ledger transfer", "err", err)
-				return nil
-			}
-
-			// Settle Seller Debit (BTC) -> Credit Buyer (BTC)
-			startBase := time.Now()
-			err = be.ProcessDoubleEntry(ctx, txID, trade.SellerID, trade.BuyerID, baseAsset, trade.Quantity, fmt.Sprintf("Settled trade delivery: %s", trade.ID))
-			om.PostgresLatencySeconds.WithLabelValues("tx").Observe(time.Since(startBase).Seconds())
-			if err != nil {
-				om.PostgresErrorsTotal.WithLabelValues("tx", "settle_base_error").Inc()
-				log.Error("Failed to settle Base ledger transfer", "err", err)
-				return nil
-			}
-
-			// Broadcast balance updates downstream
+			// Broadcast balance updates downstream for visual or other notification consumers
 			balanceEvent := types.KafkaEvent{
 				Type:      types.EventBalanceUpdate,
 				Payload:   trade,
