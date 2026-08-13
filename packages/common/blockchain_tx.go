@@ -2,9 +2,18 @@ package common
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"errors"
 	"fmt"
+	"math"
+	"math/big"
 	"os"
+	"strings"
 	"time"
+
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
 	"velyxora/packages/database"
 )
 
@@ -40,6 +49,135 @@ type BlockchainTransaction struct {
 	UTXORefs          string            `json:"utxo_refs"`
 	CreatedAt         time.Time         `json:"created_at"`
 	UpdatedAt         time.Time         `json:"updated_at"`
+}
+
+// SendRealEthereumTransaction builds, signs, and broadcasts a real EVM transaction using ethclient
+func SendRealEthereumTransaction(ctx context.Context, toAddress string, amount float64, asset string) (string, error) {
+	rpcURL := os.Getenv("ETH_RPC_URL")
+	if rpcURL == "" {
+		rpcURL = "https://cloudflare-eth.com"
+	}
+
+	ec, err := NewEthereumClientWithURL(rpcURL)
+	if err != nil {
+		return "", err
+	}
+
+	// Load private key
+	privateKeyHex := os.Getenv("ETH_PRIVATE_KEY")
+	if privateKeyHex == "" {
+		appEnv := os.Getenv("APP_ENV")
+		if appEnv == "test" || appEnv == "development" || appEnv == "simulation" {
+			privateKeyHex = "4c0883a69102937d6231471b5dbb6204fe51296178d1192a4a25d076324e6c9e" // fallback hardhat private key
+		} else {
+			return "", errors.New("FAIL CLOSED: ETH_PRIVATE_KEY is not configured in production")
+		}
+	}
+
+	privateKey, err := crypto.HexToECDSA(strings.TrimPrefix(privateKeyHex, "0x"))
+	if err != nil {
+		return "", fmt.Errorf("FAIL CLOSED: failed to parse private key: %w", err)
+	}
+
+	publicKey := privateKey.Public()
+	publicKeyECDSA, ok := publicKey.(*ecdsa.PublicKey)
+	if !ok {
+		return "", errors.New("FAIL CLOSED: failed to cast public key to ECDSA")
+	}
+
+	fromAddress := crypto.PubkeyToAddress(*publicKeyECDSA)
+
+	// Fetch pending nonce
+	nonce, err := ec.Client.PendingNonceAt(ctx, fromAddress)
+	if err != nil {
+		return "", fmt.Errorf("FAIL CLOSED: failed to fetch pending nonce: %w", err)
+	}
+
+	// Suggest Gas Price
+	gasPrice, err := ec.Client.SuggestGasPrice(ctx)
+	if err != nil {
+		return "", fmt.Errorf("FAIL CLOSED: failed to suggest gas price: %w", err)
+	}
+
+	var toAddr common.Address
+	var value *big.Int
+	var data []byte
+	var gasLimit uint64
+
+	if asset == "ETH" {
+		toAddr = common.HexToAddress(toAddress)
+		// Convert ETH amount to Wei (10^18)
+		fAmount := big.NewFloat(amount)
+		fWei := new(big.Float).Mul(fAmount, big.NewFloat(1e18))
+		value = new(big.Int)
+		fWei.Int(value)
+		gasLimit = 21000
+	} else {
+		// ERC-20 transfer
+		contractAddrStr := os.Getenv(asset + "_CONTRACT_ADDRESS")
+		if contractAddrStr == "" {
+			if asset == "USDT" {
+				contractAddrStr = "0xdAC17F958D2ee523a2206206994597C13D831ec7"
+			} else if asset == "USDC" {
+				contractAddrStr = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+			} else {
+				return "", fmt.Errorf("FAIL CLOSED: unsupported ERC-20 token: %s", asset)
+			}
+		}
+		toAddr = common.HexToAddress(contractAddrStr)
+		value = big.NewInt(0)
+
+		targetAddr := common.HexToAddress(toAddress)
+		methodID := []byte{0xa9, 0x05, 0x9c, 0xbb} // transfer(address,uint256)
+		paddedAddress := common.LeftPadBytes(targetAddr.Bytes(), 32)
+
+		decimals := 18
+		if asset == "USDT" || asset == "USDC" {
+			decimals = 6
+		}
+		fAmount := big.NewFloat(amount)
+		fDecimals := new(big.Float).SetFloat64(math.Pow10(decimals))
+		fScaled := new(big.Float).Mul(fAmount, fDecimals)
+		scaledVal := new(big.Int)
+		fScaled.Int(scaledVal)
+		paddedAmount := common.LeftPadBytes(scaledVal.Bytes(), 32)
+
+		data = append(data, methodID...)
+		data = append(data, paddedAddress...)
+		data = append(data, paddedAmount...)
+
+		gasLimit = 65000 // Safe estimate for ERC-20 token transfers
+	}
+
+	// Fetch Chain ID
+	chainID, err := ec.Client.ChainID(ctx)
+	if err != nil {
+		return "", fmt.Errorf("FAIL CLOSED: failed to retrieve ChainID: %w", err)
+	}
+
+	// Construct Transaction
+	tx := types.NewTx(&types.LegacyTx{
+		Nonce:    nonce,
+		GasPrice: gasPrice,
+		Gas:      gasLimit,
+		To:       &toAddr,
+		Value:    value,
+		Data:     data,
+	})
+
+	signer := types.NewLondonSigner(chainID)
+	signedTx, err := types.SignTx(tx, signer, privateKey)
+	if err != nil {
+		return "", fmt.Errorf("FAIL CLOSED: failed to sign transaction: %w", err)
+	}
+
+	// Broadcast
+	err = ec.Client.SendTransaction(ctx, signedTx)
+	if err != nil {
+		return "", fmt.Errorf("FAIL CLOSED: failed to send transaction: %w", err)
+	}
+
+	return signedTx.Hash().Hex(), nil
 }
 
 // ProcessBlockchainTransaction executes the entire 7-stage blockchain transaction lifecycle
@@ -106,9 +244,16 @@ func ProcessBlockchainTransaction(ctx context.Context, db *database.DB, withdraw
 		return fmt.Errorf("failed to persist BROADCASTING state: %w", err)
 	}
 
-	// Call real concrete adapter to broadcast. In production, this performs actual JSON-RPC.
-	// Only returns a valid hash from real RPC response, otherwise fails closed.
-	txHash, err := adapter.BroadcastTransaction(signedPayload)
+	var txHash string
+	// Real EVM node broadcasting if not in mock/test/simulation mode
+	if (appEnv != "development" && appEnv != "test" && appEnv != "simulation") &&
+		(asset == "ETH" || asset == "USDT" || asset == "USDC") {
+		txHash, err = SendRealEthereumTransaction(ctx, address, amount, asset)
+	} else {
+		// Call adapter to broadcast (this executes standard/mock JSON-RPC)
+		txHash, err = adapter.BroadcastTransaction(signedPayload)
+	}
+
 	if err != nil {
 		_ = saveTxState(TxFailed, "", 0, 0, err.Error())
 		if db != nil {

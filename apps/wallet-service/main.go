@@ -227,6 +227,10 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Initialize and start the background WalletWorker deposit scanner & confirmation loops
+	worker := NewWalletWorker(db, log)
+	go worker.Start(ctx)
+
 	// Handle Graceful Shutdown Signals
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)

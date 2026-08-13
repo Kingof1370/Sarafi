@@ -892,6 +892,17 @@ var schemaMigrations = []Migration{
 			);
 		`,
 	},
+	{
+		ID:   41,
+		Name: "create_blockchain_scanner_states_table",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS blockchain_scanner_states (
+				network VARCHAR(50) PRIMARY KEY,
+				last_scanned_block BIGINT DEFAULT 0 NOT NULL,
+				updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+		`,
+	},
 }
 
 // RunMigrations executes schema migration steps on the pgx connection pool
