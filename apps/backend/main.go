@@ -238,7 +238,7 @@ func main() {
 	})
 
 	// Redis Distributed Rate Limiting Middleware
-	r.Use(RateLimiterMiddleware())
+	r.Use(RequestWeightLimiter())
 
 	// Liveness Probe determines if the process is alive without depending on databases or messaging networks
 	r.GET("/health/live", func(c *gin.Context) {
