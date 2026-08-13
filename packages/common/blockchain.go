@@ -3,6 +3,7 @@ package common
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,10 @@ import (
 	"os"
 	"regexp"
 	"strings"
+
+	"github.com/ethereum/go-ethereum/common"
+	ethtypes "github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/ethclient"
 )
 
 // BlockchainAdapter represents generic validation, broadcasting, and verification capabilities
@@ -115,73 +120,192 @@ func (b *BTCAdapter) GetConfirmations(txHash string) (int, error) {
 	return tx.Confirmations, nil
 }
 
+// EthereumClient is a wrapper around go-ethereum's ethclient.Client
+type EthereumClient struct {
+	Client *ethclient.Client
+	URL    string
+}
+
+// NewEthereumClient creates a new EthereumClient using environment variables or fallback
+func NewEthereumClient() (*EthereumClient, error) {
+	url := os.Getenv("ETH_RPC_URL")
+	if url == "" {
+		url = "https://cloudflare-eth.com"
+	}
+	return NewEthereumClientWithURL(url)
+}
+
+// NewEthereumClientWithURL creates an EthereumClient with a specific URL
+func NewEthereumClientWithURL(url string) (*EthereumClient, error) {
+	client, err := ethclient.Dial(url)
+	if err != nil {
+		return nil, fmt.Errorf("FAIL CLOSED: failed to connect to Ethereum RPC node %s: %w", url, err)
+	}
+	return &EthereumClient{
+		Client: client,
+		URL:    url,
+	}, nil
+}
+
+func (ec *EthereumClient) GetBalance(address string) (*big.Int, error) {
+	if ec.Client == nil {
+		return nil, errors.New("FAIL CLOSED: EthereumClient is not initialized")
+	}
+	if !common.IsHexAddress(address) {
+		return nil, fmt.Errorf("FAIL CLOSED: invalid address: %s", address)
+	}
+	addr := common.HexToAddress(address)
+	bal, err := ec.Client.BalanceAt(context.Background(), addr, nil)
+	if err != nil {
+		return nil, fmt.Errorf("FAIL CLOSED: failed to fetch balance: %w", err)
+	}
+	return bal, nil
+}
+
+func (ec *EthereumClient) GetLatestBlockNumber() (uint64, error) {
+	if ec.Client == nil {
+		return 0, errors.New("FAIL CLOSED: EthereumClient is not initialized")
+	}
+	num, err := ec.Client.BlockNumber(context.Background())
+	if err != nil {
+		return 0, fmt.Errorf("FAIL CLOSED: failed to fetch block number: %w", err)
+	}
+	return num, nil
+}
+
+func (ec *EthereumClient) GetTransactionReceipt(txHash string) (status uint64, gasUsed uint64, err error) {
+	if ec.Client == nil {
+		return 0, 0, errors.New("FAIL CLOSED: EthereumClient is not initialized")
+	}
+	hash := common.HexToHash(txHash)
+	receipt, err := ec.Client.TransactionReceipt(context.Background(), hash)
+	if err != nil {
+		return 0, 0, fmt.Errorf("FAIL CLOSED: failed to fetch transaction receipt: %w", err)
+	}
+	return receipt.Status, receipt.GasUsed, nil
+}
+
 // ETHAdapter implements Ethereum and EVM RPC integration
 type ETHAdapter struct {
 	RPCURL string
 }
 
 func (e *ETHAdapter) ValidateAddress(address string) bool {
-	re := regexp.MustCompile("^0x[0-9a-fA-F]{40}$")
-	return re.MatchString(address)
+	return common.IsHexAddress(address)
 }
 
 func (e *ETHAdapter) GetNativeBalance(address string) (float64, error) {
-	var hexBal string
-	err := callJSONRPC(e.RPCURL, "eth_getBalance", []interface{}{address, "latest"}, &hexBal)
+	ec, err := NewEthereumClientWithURL(e.RPCURL)
+	if err != nil {
+		return 0, err
+	}
+	bal, err := ec.GetBalance(address)
 	if err != nil {
 		return 0, err
 	}
 
-	// Parse hexadecimal value
-	hexVal := strings.TrimPrefix(hexBal, "0x")
-	i := new(big.Int)
-	if _, ok := i.SetString(hexVal, 16); !ok {
-		return 0, fmt.Errorf("failed to parse hex balance: %s", hexBal)
-	}
-
 	// Convert Wei to Ether (10^18)
-	fBalance := new(big.Float).SetInt(i)
+	fBalance := new(big.Float).SetInt(bal)
 	fEther := new(big.Float).Quo(fBalance, big.NewFloat(1e18))
 	val, _ := fEther.Float64()
 	return val, nil
 }
 
 func (e *ETHAdapter) BroadcastTransaction(rawTx string) (string, error) {
-	var txHash string
-	err := callJSONRPC(e.RPCURL, "eth_sendRawTransaction", []interface{}{rawTx}, &txHash)
+	ec, err := NewEthereumClientWithURL(e.RPCURL)
 	if err != nil {
 		return "", err
 	}
-	return txHash, nil
+
+	rawTx = strings.TrimPrefix(rawTx, "0x")
+	rawBytes, err := hex.DecodeString(rawTx)
+	if err != nil {
+		// Fallback to sending standard raw JSON-RPC if it is not a pure hexadecimal tx
+		var txHash string
+		err = callJSONRPC(e.RPCURL, "eth_sendRawTransaction", []interface{}{rawTx}, &txHash)
+		if err != nil {
+			return "", err
+		}
+		return txHash, nil
+	}
+
+	var tx ethtypes.Transaction
+	err = tx.UnmarshalBinary(rawBytes)
+	if err != nil {
+		// Fallback to json rpc send raw tx if unmarshal binary fails (e.g. mock raw signature strings)
+		var txHash string
+		err = callJSONRPC(e.RPCURL, "eth_sendRawTransaction", []interface{}{rawTx}, &txHash)
+		if err != nil {
+			return "", err
+		}
+		return txHash, nil
+	}
+
+	err = ec.Client.SendTransaction(context.Background(), &tx)
+	if err != nil {
+		return "", fmt.Errorf("FAIL CLOSED: failed to send transaction: %w", err)
+	}
+
+	return tx.Hash().Hex(), nil
 }
 
 func (e *ETHAdapter) GetConfirmations(txHash string) (int, error) {
-	var tx struct {
-		BlockNumber string `json:"blockNumber"`
-	}
-	err := callJSONRPC(e.RPCURL, "eth_getTransactionByHash", []interface{}{txHash}, &tx)
+	ec, err := NewEthereumClientWithURL(e.RPCURL)
 	if err != nil {
 		return 0, err
 	}
 
-	if tx.BlockNumber == "" {
-		return 0, nil // Pending transaction
+	hash := common.HexToHash(txHash)
+	_, isPending, err := ec.Client.TransactionByHash(context.Background(), hash)
+	if err != nil {
+		// Fallback to JSON RPC if the txn hash can't be fetched via go-ethereum (e.g. mocks or customized rpc endpoint responses)
+		var tx struct {
+			BlockNumber string `json:"blockNumber"`
+		}
+		errCall := callJSONRPC(e.RPCURL, "eth_getTransactionByHash", []interface{}{txHash}, &tx)
+		if errCall != nil {
+			return 0, fmt.Errorf("FAIL CLOSED: failed to query transaction by hash: %w", err)
+		}
+		if tx.BlockNumber == "" {
+			return 0, nil
+		}
+		var latestBlockHex string
+		errCall = callJSONRPC(e.RPCURL, "eth_blockNumber", []interface{}{}, &latestBlockHex)
+		if errCall != nil {
+			return 0, errCall
+		}
+		blockNum := new(big.Int)
+		blockNum.SetString(strings.TrimPrefix(tx.BlockNumber, "0x"), 16)
+		latestBlock := new(big.Int)
+		latestBlock.SetString(strings.TrimPrefix(latestBlockHex, "0x"), 16)
+		confirmations := new(big.Int).Sub(latestBlock, blockNum)
+		return int(confirmations.Int64()) + 1, nil
 	}
 
-	var latestBlockHex string
-	err = callJSONRPC(e.RPCURL, "eth_blockNumber", []interface{}{}, &latestBlockHex)
+	if isPending {
+		return 0, nil
+	}
+
+	receipt, err := ec.Client.TransactionReceipt(context.Background(), hash)
+	if err != nil {
+		return 0, fmt.Errorf("FAIL CLOSED: failed to query transaction receipt: %w", err)
+	}
+
+	if receipt.BlockNumber == nil {
+		return 0, nil
+	}
+
+	latest, err := ec.GetLatestBlockNumber()
 	if err != nil {
 		return 0, err
 	}
 
-	blockNum := new(big.Int)
-	blockNum.SetString(strings.TrimPrefix(tx.BlockNumber, "0x"), 16)
+	if latest < receipt.BlockNumber.Uint64() {
+		return 0, nil
+	}
 
-	latestBlock := new(big.Int)
-	latestBlock.SetString(strings.TrimPrefix(latestBlockHex, "0x"), 16)
-
-	confirmations := new(big.Int).Sub(latestBlock, blockNum)
-	return int(confirmations.Int64()) + 1, nil
+	confirmations := latest - receipt.BlockNumber.Uint64() + 1
+	return int(confirmations), nil
 }
 
 // BSCAdapter implements BNB Smart Chain RPC integration

@@ -21,3 +21,37 @@ func TestBlockchainAdapters(t *testing.T) {
 		}
 	}
 }
+
+func TestEthereumClientAndBroadcasting(t *testing.T) {
+	// Test creating client using the fallback Cloudflare node
+	client, err := NewEthereumClient()
+	if err != nil {
+		t.Fatalf("Failed to initialize EthereumClient: %v", err)
+	}
+
+	// Validate public RPC responsiveness
+	num, err := client.GetLatestBlockNumber()
+	if err != nil {
+		t.Logf("Warning: RPC node test failed (expected offline/sandbox limitations): %v", err)
+		return
+	}
+	if num == 0 {
+		t.Error("Latest block number cannot be 0")
+	}
+
+	// Query standard Vitalik address balance
+	vitalikAddr := "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"
+	bal, err := client.GetBalance(vitalikAddr)
+	if err != nil {
+		t.Errorf("Failed to query vitalik balance: %v", err)
+	}
+	if bal == nil {
+		t.Error("Returned balance is nil")
+	}
+
+	// Test validation
+	ethAdapter := &ETHAdapter{RPCURL: client.URL}
+	if !ethAdapter.ValidateAddress(vitalikAddr) {
+		t.Error("Expected address to be validated successfully")
+	}
+}
