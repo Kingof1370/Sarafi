@@ -50,10 +50,12 @@ func main() {
 
 	log.Info("Starting Velyxora API Gateway...")
 
+	appEnv := getEnv("APP_ENV", "production")
+
 	// 2. Load Configuration
 	cfg := Config{
 		Port:         getEnv("PORT", "8080"),
-		JWTSecret:    getEnv("JWT_SECRET", "super-secret-velyxora-key-999"),
+		JWTSecret:    getEnv("JWT_SECRET", ""),
 		DBHost:       getEnv("DB_HOST", "localhost"),
 		DBPort:       5432,
 		DBUser:       getEnv("DB_USER", "postgres"),
@@ -61,6 +63,19 @@ func main() {
 		DBName:       getEnv("DB_NAME", "velyxora"),
 		RedisAddr:    getEnv("REDIS_ADDR", "localhost:6379"),
 		KafkaBrokers: strings.Split(getEnv("KAFKA_BROKERS", "localhost:9092"), ","),
+	}
+
+	// Enforce strict Fail-Closed security configuration in production (Resolved Issue 8)
+	if appEnv == "production" {
+		if cfg.JWTSecret == "" || cfg.JWTSecret == "super-secret-velyxora-key-999" {
+			log.Error("FAIL CLOSED: JWT_SECRET is missing, empty, or set to insecure development default in production mode")
+			os.Exit(1)
+		}
+	} else {
+		// Fallback for local tests/development
+		if cfg.JWTSecret == "" {
+			cfg.JWTSecret = "super-secret-velyxora-key-999"
+		}
 	}
 	globalJWTSecret = cfg.JWTSecret
 
@@ -73,7 +88,6 @@ func main() {
 		DBName:   cfg.DBName,
 		SSLMode:  "disable",
 	})
-	appEnv := getEnv("APP_ENV", "production")
 	if err != nil {
 		if appEnv == "production" {
 			log.Error(fmt.Sprintf("FAIL CLOSED: PostgreSQL database connection failed in production: %v", err))
@@ -446,6 +460,10 @@ func main() {
 					}
 				} else {
 					// Fallback Mock authentication for standalone verification/development runs
+					if appEnv == "production" {
+						c.JSON(http.StatusServiceUnavailable, gin.H{"error": "FAIL CLOSED: Mock authentication is strictly disabled in production mode"})
+						return
+					}
 					userID = "usr_mock_123"
 					hashedPassword, _ = security.HashPassword("StrongPass1!")
 					if req.Email != "test@velyxora.com" || req.Password != "StrongPass1!" {

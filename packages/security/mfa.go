@@ -2,9 +2,11 @@ package security
 
 import (
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha1"
 	"encoding/base32"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"time"
@@ -42,6 +44,29 @@ func ValidateTOTP(secret, code string) bool {
 	}
 
 	return false
+}
+
+// GenerateTOTPSecret generates a new cryptographically random 32-character Base32 secret seed and backup codes
+func GenerateTOTPSecret() (string, []string, error) {
+	bytes := make([]byte, 20)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", nil, fmt.Errorf("failed to read secure random bytes: %w", err)
+	}
+
+	secret := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(bytes)
+
+	// Generate 3 unique cryptographic backup codes in "xxxx-xxxx" format
+	backupCodes := make([]string, 3)
+	for i := 0; i < 3; i++ {
+		codeBytes := make([]byte, 8)
+		if _, err := rand.Read(codeBytes); err != nil {
+			return "", nil, err
+		}
+		hexStr := hex.EncodeToString(codeBytes)
+		backupCodes[i] = fmt.Sprintf("%s-%s", hexStr[:4], hexStr[4:8])
+	}
+
+	return secret, backupCodes, nil
 }
 
 // generateHOTP generates a 6-digit HOTP code for a given counter.

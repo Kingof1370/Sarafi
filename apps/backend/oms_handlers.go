@@ -707,16 +707,26 @@ func handleCreateOrder(c *gin.Context) {
 	// In production, when globalKafkaProducer is initialized, submit order to Kafka to converge matching on the single stateful matching-engine
 	if globalKafkaProducer != nil {
 		legacyOrder := types.Order{
-			ID:        order.ID,
-			UserID:    order.UserID,
-			Symbol:    order.Symbol,
-			Side:      types.OrderSide(order.Side),
-			Type:      types.OrderType(order.Type),
-			Price:     order.Price,
-			Quantity:  order.Quantity,
-			Status:    types.StatusNew,
-			CreatedAt: order.CreatedAt,
-			UpdatedAt: order.UpdatedAt,
+			ID:            order.ID,
+			UserID:        order.UserID,
+			Symbol:        order.Symbol,
+			Side:          types.OrderSide(order.Side),
+			Type:          types.OrderType(order.Type),
+			Price:         order.Price,
+			Quantity:      order.Quantity,
+			Status:        types.StatusNew,
+			TimeInForce:   string(order.TimeInForce),
+			PostOnly:      order.PostOnly,
+			CreatedAt:     order.CreatedAt,
+			UpdatedAt:     order.UpdatedAt,
+			ClientOrderID: order.ClientOrderID,
+			ExternalRefID: order.ExternalRefID,
+			ExecutionID:   order.ExecutionID,
+			CorrelationID: order.CorrelationID,
+			StopPrice:     order.StopPrice,
+			TrailingDelta: order.TrailingDelta,
+			IcebergSize:   order.IcebergSize,
+			ReduceOnly:    order.ReduceOnly,
 		}
 		event := types.KafkaEvent{
 			Type:      types.EventOrderCreated,
@@ -834,16 +844,26 @@ func handleReplaceOrder(c *gin.Context) {
 		_ = globalKafkaProducer.Publish(context.Background(), "velyxora-orders", cancelOrderID, cancelEvent)
 
 		legacyOrder := types.Order{
-			ID:        newOrder.ID,
-			UserID:    newOrder.UserID,
-			Symbol:    newOrder.Symbol,
-			Side:      types.OrderSide(newOrder.Side),
-			Type:      types.OrderType(newOrder.Type),
-			Price:     newOrder.Price,
-			Quantity:  newOrder.Quantity,
-			Status:    types.StatusNew,
-			CreatedAt: newOrder.CreatedAt,
-			UpdatedAt: newOrder.UpdatedAt,
+			ID:            newOrder.ID,
+			UserID:        newOrder.UserID,
+			Symbol:        newOrder.Symbol,
+			Side:          types.OrderSide(newOrder.Side),
+			Type:          types.OrderType(newOrder.Type),
+			Price:         newOrder.Price,
+			Quantity:      newOrder.Quantity,
+			Status:        types.StatusNew,
+			TimeInForce:   string(newOrder.TimeInForce),
+			PostOnly:      newOrder.PostOnly,
+			CreatedAt:     newOrder.CreatedAt,
+			UpdatedAt:     newOrder.UpdatedAt,
+			ClientOrderID: newOrder.ClientOrderID,
+			ExternalRefID: newOrder.ExternalRefID,
+			ExecutionID:   newOrder.ExecutionID,
+			CorrelationID: newOrder.CorrelationID,
+			StopPrice:     newOrder.StopPrice,
+			TrailingDelta: newOrder.TrailingDelta,
+			IcebergSize:   newOrder.IcebergSize,
+			ReduceOnly:    newOrder.ReduceOnly,
 		}
 		createEvent := types.KafkaEvent{
 			Type:      types.EventOrderCreated,
@@ -1134,11 +1154,9 @@ func handleGetMarketDepth(c *gin.Context) {
 		limit = 100
 	}
 
-	matcher := globalOMSRouter.GetMatcher()
 	var depth *types.OrderBookL2
-
-	if matcher != nil && strings.ToUpper(symbol) == strings.ToUpper(matcher.Symbol) {
-		depth = matcher.GetL2Depth(limit)
+	if globalOMSRouter != nil {
+		depth = globalOMSRouter.GetAggregatedL2DepthForSymbol(strings.ToUpper(symbol), limit)
 	} else {
 		depth = &types.OrderBookL2{
 			Symbol:    symbol,
@@ -1178,11 +1196,17 @@ func handleGetMarketCandles(c *gin.Context) {
 
 func handleGetMarketStats(c *gin.Context) {
 	symbol := c.DefaultQuery("symbol", "BTC-USDT")
-	matcher := globalOMSRouter.GetMatcher()
+	var stats interface{}
 
-	if matcher != nil && strings.ToUpper(symbol) == strings.ToUpper(matcher.Symbol) {
-		le := engine.NewLiquidityEngine()
-		stats := le.AnalyzeDepth(matcher)
+	if globalOMSRouter != nil {
+		matcher := globalOMSRouter.GetMatcherForSymbol(strings.ToUpper(symbol))
+		if matcher != nil {
+			le := engine.NewLiquidityEngine()
+			stats = le.AnalyzeDepth(matcher)
+		}
+	}
+
+	if stats != nil {
 		c.JSON(http.StatusOK, stats)
 	} else {
 		c.JSON(http.StatusOK, gin.H{

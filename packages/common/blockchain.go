@@ -10,7 +10,6 @@ import (
 	"math/big"
 	"net/http"
 	"os"
-	"regexp"
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -85,10 +84,7 @@ type BTCAdapter struct {
 }
 
 func (b *BTCAdapter) ValidateAddress(address string) bool {
-	if len(address) < 26 || len(address) > 35 {
-		return false
-	}
-	return strings.HasPrefix(address, "1") || strings.HasPrefix(address, "3") || strings.HasPrefix(address, "bc1")
+	return ValidateCryptographicAddress(address, "BTC")
 }
 
 func (b *BTCAdapter) GetNativeBalance(address string) (float64, error) {
@@ -191,7 +187,7 @@ type ETHAdapter struct {
 }
 
 func (e *ETHAdapter) ValidateAddress(address string) bool {
-	return common.IsHexAddress(address)
+	return ValidateCryptographicAddress(address, "ETH")
 }
 
 func (e *ETHAdapter) GetNativeBalance(address string) (float64, error) {
@@ -329,11 +325,7 @@ type SolanaAdapter struct {
 }
 
 func (s *SolanaAdapter) ValidateAddress(address string) bool {
-	if len(address) < 32 || len(address) > 44 {
-		return false
-	}
-	re := regexp.MustCompile("^[1-9A-HJ-NP-Za-km-z]+$")
-	return re.MatchString(address)
+	return ValidateCryptographicAddress(address, "SOL")
 }
 
 func (s *SolanaAdapter) GetNativeBalance(address string) (float64, error) {
@@ -380,11 +372,7 @@ type TronAdapter struct {
 }
 
 func (t *TronAdapter) ValidateAddress(address string) bool {
-	if len(address) != 34 || !strings.HasPrefix(address, "T") {
-		return false
-	}
-	re := regexp.MustCompile("^[a-zA-Z0-9]+$")
-	return re.MatchString(address)
+	return ValidateCryptographicAddress(address, "TRON")
 }
 
 func (t *TronAdapter) GetNativeBalance(address string) (float64, error) {
@@ -422,10 +410,7 @@ type LitecoinAdapter struct {
 }
 
 func (l *LitecoinAdapter) ValidateAddress(address string) bool {
-	if len(address) < 26 || len(address) > 43 {
-		return false
-	}
-	return strings.HasPrefix(address, "L") || strings.HasPrefix(address, "M") || strings.HasPrefix(address, "ltc1")
+	return ValidateCryptographicAddress(address, "LTC")
 }
 
 // SimulationBlockchainProvider is a mock provider used ONLY in development/test/simulation mode

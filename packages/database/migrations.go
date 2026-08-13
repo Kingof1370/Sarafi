@@ -256,6 +256,7 @@ var schemaMigrations = []Migration{
 				retries INT DEFAULT 0 NOT NULL,
 				max_retries INT DEFAULT 3 NOT NULL,
 				error_msg TEXT DEFAULT '' NOT NULL,
+				payload TEXT DEFAULT '' NOT NULL,
 				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
 			);
 		`,

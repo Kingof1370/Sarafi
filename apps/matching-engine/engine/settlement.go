@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -71,19 +72,52 @@ func (se *SettlementEngine) QueueSettlement(exec *Execution, baseAsset, quoteAss
 	}
 
 	se.queue = append(se.queue, job)
+
+	// Persist settlement job into database if pool is online (Transactional Outbox / Durable Queue)
+	if se.db != nil {
+		payloadBytes, err := json.Marshal(job)
+		if err == nil {
+			_, _ = se.db.Pool.Exec(context.Background(),
+				`INSERT INTO settlements_queue (id, trade_id, status, retries, max_retries, error_msg, payload, created_at)
+				 VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+				 ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status, updated_at = NOW()`,
+				job.ID, exec.TradeID, string(job.Status), job.Retries, job.MaxRetries, job.ErrorMsg, string(payloadBytes))
+		}
+	}
+
 	return job
 }
 
 // ProcessQueue runs through all pending settlement jobs sequentially and applies retry logic on failures
 func (se *SettlementEngine) ProcessQueue(ctx context.Context) (int, int) {
 	se.mu.Lock()
-	if len(se.queue) == 0 {
-		se.mu.Unlock()
-		return 0, 0
+
+	// If database is available, query pending outbox jobs from PostgreSQL for complete durability and recovery!
+	var activeJobs []*SettlementJob
+	if se.db != nil {
+		rows, err := se.db.Pool.Query(ctx,
+			`SELECT payload FROM settlements_queue
+			 WHERE status = 'PENDING' OR status = 'RETRYING'
+			 ORDER BY created_at ASC`)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var payloadStr string
+				if errScan := rows.Scan(&payloadStr); errScan == nil {
+					var job SettlementJob
+					if errUnmarshal := json.Unmarshal([]byte(payloadStr), &job); errUnmarshal == nil {
+						activeJobs = append(activeJobs, &job)
+					}
+				}
+			}
+		}
 	}
 
-	activeJobs := make([]*SettlementJob, len(se.queue))
-	copy(activeJobs, se.queue)
+	// Fallback/Union with memory queue (essential for standalone tests)
+	if len(activeJobs) == 0 {
+		activeJobs = make([]*SettlementJob, len(se.queue))
+		copy(activeJobs, se.queue)
+	}
 	se.queue = make([]*SettlementJob, 0)
 	se.mu.Unlock()
 
@@ -95,16 +129,7 @@ func (se *SettlementEngine) ProcessQueue(ctx context.Context) (int, int) {
 		// Since we now support multi-asset fee payments (e.g. fees paid in VLX instead of the quote asset),
 		// we must perform validation on a per-asset basis.
 
-		// 1. Identify the assets involved in the double entry checks
-		// - BaseAsset: Seller debited, Buyer credited
-		// - QuoteAsset: Buyer debited, Seller credited (potentially adjusted for buyer/seller fees)
-		// - VLX/Other Fee Assets: Buyer/Seller debited, platform credited
-
 		tradeValue := common.SafeMul(job.Exec.Price, job.Exec.Quantity)
-
-		// Base asset balance flow:
-		// Buyer debit = -Quantity, Seller credit = -Quantity. Net change of base asset = 0.
-		// Let's verify quote asset and fee assets balance perfectly.
 
 		// Calculate expected debits and credits per asset:
 		// Map of expected net movement: asset -> balance (must sum to zero)
@@ -169,13 +194,28 @@ func (se *SettlementEngine) ProcessQueue(ctx context.Context) (int, int) {
 			if job.Retries <= job.MaxRetries {
 				job.Status = SettleRetrying
 				job.ErrorMsg = err.Error()
-				// Place back in queue for retry backoff
-				se.mu.Lock()
-				se.queue = append(se.queue, job)
-				se.mu.Unlock()
+
+				if se.db != nil {
+					payloadBytes, _ := json.Marshal(job)
+					_, _ = se.db.Pool.Exec(ctx,
+						"UPDATE settlements_queue SET status = 'RETRYING', retries = $1, error_msg = $2, payload = $3 WHERE id = $4",
+						job.Retries, job.ErrorMsg, string(payloadBytes), job.ID)
+				} else {
+					// Place back in memory queue for retry backoff
+					se.mu.Lock()
+					se.queue = append(se.queue, job)
+					se.mu.Unlock()
+				}
 			} else {
 				job.Status = SettleFailed
 				job.ErrorMsg = fmt.Sprintf("Max retries exceeded: %v", err)
+
+				if se.db != nil {
+					payloadBytes, _ := json.Marshal(job)
+					_, _ = se.db.Pool.Exec(ctx,
+						"UPDATE settlements_queue SET status = 'FAILED', error_msg = $1, payload = $2 WHERE id = $3",
+						job.ErrorMsg, string(payloadBytes), job.ID)
+				}
 				se.archiveJob(job)
 				failCount++
 			}
@@ -219,11 +259,6 @@ func (se *SettlementEngine) executeSettlementTransaction(ctx context.Context, jo
 	}
 
 	// 1. Debit Buyer Quote Asset (Price * Quantity) and potentially fee if paid in Quote asset (from Reserved)
-	// During order validation/reservation, the buyer had `Quantity * Price + BuyerRawFee` reserved in QuoteAsset.
-	// Since the actual fee could have been paid in VLX instead of the QuoteAsset, we must release the hold correctly:
-	// - If paid in QuoteAsset: reserved -= (tradeValue + BuyerFee), total -= (tradeValue + BuyerFee)
-	// - If paid in VLX: reserved -= (tradeValue + BuyerRawFee), total -= tradeValue.
-	//   And we also debit VLX from the buyer's balance: available -= BuyerFee (or total -= BuyerFee, but since it wasn't reserved, we subtract from available and total).
 	buyerQuoteReservedDebit := common.SafeAdd(tradeValue, exec.BuyerRawFee)
 	var buyerQuoteTotalDebit float64
 	if buyerFeeAsset == job.QuoteAsset {
@@ -382,6 +417,23 @@ func (se *SettlementEngine) executeSettlementTransaction(ctx context.Context, jo
 		return fmt.Errorf("failed to write platform seller fee credit ledger: %w", err)
 	}
 
+	// 7. Atomic Persistent Queue cleanup & history archiving (Resolved Issue 4)
+	_, err = tx.Exec(ctx,
+		"DELETE FROM settlements_queue WHERE id = $1",
+		job.ID)
+	if err != nil {
+		return fmt.Errorf("failed to clean up durable queue outbox: %w", err)
+	}
+
+	_, err = tx.Exec(ctx,
+		`INSERT INTO settlements_history (id, trade_id, buyer_id, seller_id, price, quantity, status, completed_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, 'COMPLETED', NOW())
+		 ON CONFLICT (id) DO NOTHING`,
+		job.ID, exec.TradeID, exec.BuyerID, exec.SellerID, exec.Price, exec.Quantity)
+	if err != nil {
+		return fmt.Errorf("failed to record persistent settlement history: %w", err)
+	}
+
 	// Commit Transaction
 	err = tx.Commit(ctx)
 	if err != nil {
@@ -429,6 +481,15 @@ func (se *SettlementEngine) GetFailedJobs() []*SettlementJob {
 func (se *SettlementEngine) GetPendingJobsCount() int {
 	se.mu.RLock()
 	defer se.mu.RUnlock()
+
+	if se.db != nil {
+		var count int
+		err := se.db.Pool.QueryRow(context.Background(),
+			"SELECT COUNT(*) FROM settlements_queue WHERE status = 'PENDING' OR status = 'RETRYING'").Scan(&count)
+		if err == nil {
+			return count
+		}
+	}
 	return len(se.queue)
 }
 
