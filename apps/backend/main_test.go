@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -111,5 +112,122 @@ func TestWalletWithdrawalValidationAPI(t *testing.T) {
 
 	if w2.Code != http.StatusAccepted {
 		t.Errorf("Expected status 202 Accepted, got %d", w2.Code)
+	}
+}
+
+func TestGetRequestWeight(t *testing.T) {
+	// 1. Test GET /api/v1/market/depth with no context or no query
+	w1 := GetRequestWeight("GET", "/api/v1/market/depth", nil)
+	if w1 != 50 {
+		t.Errorf("Expected weight 50, got %d", w1)
+	}
+
+	// 2. Test GET /api/v1/market/depth with limit query <= 20
+	c2, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c2.Request, _ = http.NewRequest("GET", "/api/v1/market/depth?limit=10", nil)
+	w2 := GetRequestWeight("GET", "/api/v1/market/depth", c2)
+	if w2 != 20 {
+		t.Errorf("Expected weight 20, got %d", w2)
+	}
+
+	// 3. Test GET /api/v1/market/depth with limit query > 20
+	c3, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c3.Request, _ = http.NewRequest("GET", "/api/v1/market/depth?limit=50", nil)
+	w3 := GetRequestWeight("GET", "/api/v1/market/depth", c3)
+	if w3 != 50 {
+		t.Errorf("Expected weight 50, got %d", w3)
+	}
+
+	// 4. Test GET /api/v1/market/trades
+	w4 := GetRequestWeight("GET", "/api/v1/market/trades", nil)
+	if w4 != 5 {
+		t.Errorf("Expected weight 5, got %d", w4)
+	}
+
+	// 5. Test POST /api/v1/oms/orders
+	w5 := GetRequestWeight("POST", "/api/v1/oms/orders", nil)
+	if w5 != 2 {
+		t.Errorf("Expected weight 2, got %d", w5)
+	}
+
+	// 6. Test GET /api/v1/system/health
+	w6 := GetRequestWeight("GET", "/api/v1/system/health", nil)
+	if w6 != 1 {
+		t.Errorf("Expected weight 1, got %d", w6)
+	}
+
+	// 7. Test default weight
+	w7 := GetRequestWeight("GET", "/api/v1/some/random/endpoint", nil)
+	if w7 != 1 {
+		t.Errorf("Expected weight 1, got %d", w7)
+	}
+}
+
+func TestRequestWeightLimiter_Allowed(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+
+	// Override hook to simulate an allowed request with cumulative weight 100
+	redisEvalHook = func(ctx context.Context, key string, now, window, limit, weight int64, member string) ([]interface{}, error) {
+		return []interface{}{int64(1), int64(100), int64(0)}, nil
+	}
+	defer func() { redisEvalHook = nil }()
+
+	r.Use(RequestWeightLimiter())
+	r.GET("/api/v1/system/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "OK"})
+	})
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/api/v1/system/health", nil)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected 200 OK, got %d", w.Code)
+	}
+
+	usedWeight := w.Header().Get("X-MBX-USED-WEIGHT-(1m)")
+	if usedWeight != "100" {
+		t.Errorf("Expected X-MBX-USED-WEIGHT-(1m) header to be '100', got '%s'", usedWeight)
+	}
+}
+
+func TestRequestWeightLimiter_Blocked(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+
+	// Override hook to simulate a blocked request with cumulative weight 1205 and retry after 45s
+	redisEvalHook = func(ctx context.Context, key string, now, window, limit, weight int64, member string) ([]interface{}, error) {
+		return []interface{}{int64(0), int64(1205), int64(45)}, nil
+	}
+	defer func() { redisEvalHook = nil }()
+
+	r.Use(RequestWeightLimiter())
+	r.GET("/api/v1/market/depth", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "OK"})
+	})
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/api/v1/market/depth", nil)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusTooManyRequests {
+		t.Errorf("Expected 429 Too Many Requests, got %d", w.Code)
+	}
+
+	usedWeight := w.Header().Get("X-MBX-USED-WEIGHT-(1m)")
+	if usedWeight != "1205" {
+		t.Errorf("Expected X-MBX-USED-WEIGHT-(1m) header to be '1205', got '%s'", usedWeight)
+	}
+
+	retryAfter := w.Header().Get("Retry-After")
+	if retryAfter != "45" {
+		t.Errorf("Expected Retry-After header to be '45', got '%s'", retryAfter)
+	}
+
+	var resp map[string]interface{}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp["error"] != "Too many requests. API weight limit exceeded." {
+		t.Errorf("Expected error message 'Too many requests. API weight limit exceeded.', got '%v'", resp["error"])
 	}
 }
