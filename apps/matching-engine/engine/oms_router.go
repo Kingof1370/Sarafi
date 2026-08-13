@@ -18,6 +18,7 @@ type OMSRouter struct {
 	matcher            *Matcher
 	execution          *ExecutionEngine
 	settlement         *SettlementEngine
+	liquidityBridge    *LiquidityBridge
 	OnTradeMatched     func(symbol string, price, quantity float64, timestamp time.Time)
 	OnOrderBookChanged func(symbol string)
 }
@@ -43,6 +44,116 @@ func NewOMSRouter(sm *OMSStateMachine, val *OMSValidator, risk *RiskEngine, matc
 	}
 
 	return router
+}
+
+// SetLiquidityBridge configures the external liquidity engine bridge
+func (or *OMSRouter) SetLiquidityBridge(lb *LiquidityBridge) {
+	or.mu.Lock()
+	defer or.mu.Unlock()
+	or.liquidityBridge = lb
+}
+
+// GetAggregatedL2Depth merges the local Matcher book depth with external real-time liquidity
+func (or *OMSRouter) GetAggregatedL2Depth(maxLevels int) *types.OrderBookL2 {
+	or.mu.RLock()
+	lb := or.liquidityBridge
+	or.mu.RUnlock()
+
+	// 1. Retrieve local book depth
+	localL2 := or.matcher.GetL2Depth(maxLevels)
+	for i := range localL2.Bids {
+		localL2.Bids[i].IsAggregated = false
+		localL2.Bids[i].Source = "Local"
+	}
+	for i := range localL2.Asks {
+		localL2.Asks[i].IsAggregated = false
+		localL2.Asks[i].Source = "Local"
+	}
+
+	if lb == nil {
+		return localL2
+	}
+
+	// 2. Retrieve external book depth
+	extL2, err := lb.GetOrderBook(or.matcher.Symbol)
+	if err != nil {
+		// Degradation: Fallback to only local depth
+		return localL2
+	}
+
+	// 3. Merge Bids (sorted descending)
+	mergedBids := make([]types.OrderBookLevel, 0, len(localL2.Bids)+len(extL2.Bids))
+	i, j := 0, 0
+	for i < len(localL2.Bids) && j < len(extL2.Bids) {
+		localBid := localL2.Bids[i]
+		extBid := extL2.Bids[j]
+
+		if localBid.Price > extBid.Price {
+			mergedBids = append(mergedBids, localBid)
+			i++
+		} else if localBid.Price < extBid.Price {
+			mergedBids = append(mergedBids, extBid)
+			j++
+		} else {
+			mergedBids = append(mergedBids, localBid)
+			mergedBids = append(mergedBids, extBid)
+			i++
+			j++
+		}
+	}
+	for i < len(localL2.Bids) {
+		mergedBids = append(mergedBids, localL2.Bids[i])
+		i++
+	}
+	for j < len(extL2.Bids) {
+		mergedBids = append(mergedBids, extL2.Bids[j])
+		j++
+	}
+
+	// 4. Merge Asks (sorted ascending)
+	mergedAsks := make([]types.OrderBookLevel, 0, len(localL2.Asks)+len(extL2.Asks))
+	i, j = 0, 0
+	for i < len(localL2.Asks) && j < len(extL2.Asks) {
+		localAsk := localL2.Asks[i]
+		extAsk := extL2.Asks[j]
+
+		if localAsk.Price < extAsk.Price {
+			mergedAsks = append(mergedAsks, localAsk)
+			i++
+		} else if localAsk.Price > extAsk.Price {
+			mergedAsks = append(mergedAsks, extAsk)
+			j++
+		} else {
+			mergedAsks = append(mergedAsks, localAsk)
+			mergedAsks = append(mergedAsks, extAsk)
+			i++
+			j++
+		}
+	}
+	for i < len(localL2.Asks) {
+		mergedAsks = append(mergedAsks, localL2.Asks[i])
+		i++
+	}
+	for j < len(extL2.Asks) {
+		mergedAsks = append(mergedAsks, extL2.Asks[j])
+		j++
+	}
+
+	// Limit to maxLevels
+	if len(mergedBids) > maxLevels {
+		mergedBids = mergedBids[:maxLevels]
+	}
+	if len(mergedAsks) > maxLevels {
+		mergedAsks = mergedAsks[:maxLevels]
+	}
+
+	return &types.OrderBookL2{
+		Symbol:    or.matcher.Symbol,
+		Bids:      mergedBids,
+		Asks:      mergedAsks,
+		Sequence:  localL2.Sequence,
+		Timestamp: time.Now(),
+	}
 }
 
 // ProcessIncomingOrder processes orders through validation, risk hold, and matching pipelines
@@ -115,9 +226,112 @@ func (or *OMSRouter) ProcessIncomingOrder(ctx context.Context, order *AdvancedOr
 	_, _ = or.stateMachine.TransitionOrder(order.ID, StatusOMS_Queued, "QUEUE", ip, device, "Queued inside the limit book")
 
 	matches := or.matcher.MatchOrder(legacyOrder)
-	if len(matches) > 0 {
+
+	var externalMatches []*types.Trade
+	or.mu.RLock()
+	lb := or.liquidityBridge
+	or.mu.RUnlock()
+
+	// External Hedging Bridge check
+	if lb != nil && legacyOrder.FilledQty < legacyOrder.Quantity && legacyOrder.Status != types.StatusCancelled && legacyOrder.Status != types.StatusRejected {
+		extBook, err := lb.GetOrderBook(order.Symbol)
+		if err == nil {
+			var extLevels []types.OrderBookLevel
+			if legacyOrder.Side == types.SideBuy {
+				extLevels = extBook.Asks
+			} else {
+				extLevels = extBook.Bids
+			}
+
+			if len(extLevels) > 0 {
+				// Remove order temporarily from local matcher book to prevent double match during calculation
+				or.matcher.CancelOrder(legacyOrder.ID)
+
+				for i := 0; i < len(extLevels) && legacyOrder.FilledQty < legacyOrder.Quantity; i++ {
+					level := extLevels[i]
+
+					// Check Limit price crosses
+					if legacyOrder.Type == types.TypeLimit {
+						if legacyOrder.Side == types.SideBuy && legacyOrder.Price < level.Price {
+							break
+						}
+						if legacyOrder.Side == types.SideSell && legacyOrder.Price > level.Price {
+							break
+						}
+					}
+
+					matchQty := legacyOrder.Quantity - legacyOrder.FilledQty
+					if matchQty > level.Quantity {
+						matchQty = level.Quantity
+					}
+
+					if matchQty <= 0 {
+						continue
+					}
+
+					tradeID := fmt.Sprintf("trd_ext_%d", time.Now().UnixNano())
+					trade := &types.Trade{
+						ID:        tradeID,
+						Symbol:    order.Symbol,
+						Price:     level.Price,
+						Quantity:  matchQty,
+						Timestamp: time.Now(),
+					}
+
+					if legacyOrder.Side == types.SideBuy {
+						trade.BuyerID = legacyOrder.UserID
+						trade.SellerID = "EXT_LIQUIDITY_BINANCE"
+						trade.BuyOrderID = legacyOrder.ID
+						trade.SellOrderID = "ext_sell_order_binance"
+					} else {
+						trade.BuyerID = "EXT_LIQUIDITY_BINANCE"
+						trade.SellerID = legacyOrder.UserID
+						trade.BuyOrderID = "ext_buy_order_binance"
+						trade.SellOrderID = legacyOrder.ID
+					}
+
+					externalMatches = append(externalMatches, trade)
+					legacyOrder.FilledQty += matchQty
+
+					if legacyOrder.FilledQty >= legacyOrder.Quantity {
+						legacyOrder.Status = types.StatusFilled
+					} else {
+						legacyOrder.Status = types.StatusPartiallyFilled
+					}
+
+					// Trigger asynchronous external hedge call to Binance
+					go func(qty float64, prc float64, side types.OrderSide) {
+						hedgeOrder := &types.Order{
+							ID:       "hdg_" + fmt.Sprintf("%d", time.Now().UnixNano()),
+							Symbol:   order.Symbol,
+							Side:     side,
+							Type:     types.TypeMarket,
+							Price:    prc,
+							Quantity: qty,
+							UserID:   "PLATFORM_HEDGE_ACCOUNT",
+						}
+						_, hErr := lb.ExecuteOrder(hedgeOrder)
+						if hErr != nil {
+							lb.log.Error("Asynchronous external hedge execution failed", "err", hErr)
+						} else {
+							lb.log.Info("Asynchronous external hedge executed successfully", "qty", qty, "price", prc)
+						}
+					}(matchQty, level.Price, legacyOrder.Side)
+				}
+
+				// If still not fully filled and is a Limit order, add back to local book
+				if legacyOrder.FilledQty < legacyOrder.Quantity && legacyOrder.Type == types.TypeLimit {
+					or.matcher.AddOrderToBookDirect(legacyOrder)
+				}
+			}
+		}
+	}
+
+	allMatches := append(matches, externalMatches...)
+
+	if len(allMatches) > 0 {
 		// Process Executions
-		executions := or.execution.ProcessTrades(matches, quoteAsset, baseAsset)
+		executions := or.execution.ProcessTrades(allMatches, quoteAsset, baseAsset)
 
 		for _, exec := range executions {
 			// Persist balance adjustments via asynchronous queue clearing
@@ -125,7 +339,7 @@ func (or *OMSRouter) ProcessIncomingOrder(ctx context.Context, order *AdvancedOr
 		}
 
 		// Trigger Trade Callback for Tickers/Candles/WebSockets
-		for _, t := range matches {
+		for _, t := range allMatches {
 			if or.OnTradeMatched != nil {
 				or.OnTradeMatched(t.Symbol, t.Price, t.Quantity, t.Timestamp)
 			}
@@ -141,7 +355,7 @@ func (or *OMSRouter) ProcessIncomingOrder(ctx context.Context, order *AdvancedOr
 			_, _ = or.stateMachine.TransitionOrder(order.ID, StatusOMS_PartiallyFilled, "FILL", ip, device, "Partially filled")
 		}
 
-		// Also update any resting (maker) orders matched during this execution leg in the OMS
+		// Also update any resting (maker) orders matched during this execution leg in the OMS (from local matches only)
 		for _, t := range matches {
 			makerOrderID := t.SellOrderID
 			if order.Side == "SELL" {

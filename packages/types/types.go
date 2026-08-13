@@ -99,8 +99,10 @@ type UserAPIKey struct {
 
 // OrderBookLevel represents a single price level in the L2 stream
 type OrderBookLevel struct {
-	Price    float64 `json:"price"`
-	Quantity float64 `json:"quantity"`
+	Price        float64 `json:"price"`
+	Quantity     float64 `json:"quantity"`
+	IsAggregated bool    `json:"is_aggregated"`
+	Source       string  `json:"source"`
 }
 
 // OrderBookL2 represents Level 2 market depth snapshots

@@ -351,6 +351,17 @@ func (m *Matcher) addOrderToBook(order *types.Order, limits *[]*MatchLimit, desc
 	*limits = append(*limits, &MatchLimit{Price: price, Orders: []*types.Order{order}})
 }
 
+// AddOrderToBookDirect safely puts a limit order back onto the appropriate book side with locking
+func (m *Matcher) AddOrderToBookDirect(order *types.Order) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if order.Side == types.SideBuy {
+		m.addOrderToBook(order, &m.Bids, true)
+	} else {
+		m.addOrderToBook(order, &m.Asks, false)
+	}
+}
+
 // triggerStopOrders monitors the price and enters stop orders into limit book when crossed
 func (m *Matcher) triggerStopOrders(currentPrice float64) {
 	var triggered []*types.Order
