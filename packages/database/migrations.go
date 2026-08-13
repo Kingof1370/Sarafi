@@ -903,6 +903,30 @@ var schemaMigrations = []Migration{
 			);
 		`,
 	},
+	{
+		ID:   42,
+		Name: "create_futures_and_liquidation_tables",
+		SQL: `
+			CREATE TABLE IF NOT EXISTS user_positions (
+				user_id VARCHAR(255) NOT NULL,
+				symbol VARCHAR(100) NOT NULL,
+				size DECIMAL(36, 18) NOT NULL,
+				entry_price DECIMAL(36, 18) NOT NULL,
+				margin DECIMAL(36, 18) NOT NULL,
+				leverage DECIMAL(36, 18) NOT NULL,
+				realized_pnl DECIMAL(36, 18) DEFAULT 0.0 NOT NULL,
+				unrealized_pnl DECIMAL(36, 18) DEFAULT 0.0 NOT NULL,
+				updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+				PRIMARY KEY (user_id, symbol)
+			);
+
+			CREATE TABLE IF NOT EXISTS futures_insurance_funds (
+				asset VARCHAR(50) PRIMARY KEY,
+				balance DECIMAL(36, 18) DEFAULT 0.0 NOT NULL,
+				updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+			);
+		`,
+	},
 }
 
 // RunMigrations executes schema migration steps on the pgx connection pool
