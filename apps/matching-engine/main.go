@@ -76,21 +76,25 @@ func main() {
 	sm := engine.NewOMSStateMachine()
 	val := engine.NewOMSValidator()
 	risk := engine.NewRiskEngine(10.0, 100000.0)
-	matcher := engine.NewMatcher("BTC-USDT")
 	fees := engine.NewFeesEngine(0.0010, 0.0020)
 	exec := engine.NewExecutionEngine(fees, risk)
 	settle := engine.NewSettlementEngine(db)
 
-	omsRouter := engine.NewOMSRouter(sm, val, risk, matcher, exec, settle)
+	// Markets are created on demand by the MarketRegistry; no market is hardcoded.
+	omsRouter := engine.NewOMSRouter(sm, val, risk, nil, exec, settle)
 	if db != nil {
 		omsRouter.SetDB(db)
 	}
+	marketServices := engine.NewMarketServices()
+	candleEngine := engine.NewCandleEngine(db, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	// Synchronously publish trades/depth to Kafka
 	omsRouter.OnTradeMatched = func(symbol string, price, quantity float64, timestamp time.Time) {
+		// The trading core owns market statistics; gateways only read them.
+		marketServices.RecordTrade(symbol, price, quantity)
 		tradePayload := map[string]interface{}{
 			"symbol":    symbol,
 			"price":     price,
@@ -117,6 +121,18 @@ func main() {
 			_ = producer.Publish(ctx, "velyxora-depth", symbol, event)
 		}
 	}
+
+	// 3b. Expose the authoritative trading core over the internal HTTP API so
+	// that the API gateway never instantiates an engine of its own.
+	internalToken := getEnv("INTERNAL_SERVICE_TOKEN", "")
+	if internalToken == "" {
+		log.Error("FAIL CLOSED: INTERNAL_SERVICE_TOKEN is not configured; the trading core API cannot start")
+		os.Exit(1)
+	}
+	apiAddr := getEnv("MATCHING_ENGINE_HTTP_ADDR", ":8081")
+	api := newInternalAPI(omsRouter, marketServices, candleEngine, internalToken, log)
+	api.serve(ctx, apiAddr)
+	log.Info("Internal trading core API listening", "addr", apiAddr)
 
 	// Handle Graceful Shutdown Signals
 	sigChan := make(chan os.Signal, 1)

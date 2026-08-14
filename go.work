@@ -9,6 +9,7 @@ use (
 	./packages/database
 	./packages/logger
 	./packages/security
+	./packages/tradingcore
 	./packages/types
 	./tests
 )
